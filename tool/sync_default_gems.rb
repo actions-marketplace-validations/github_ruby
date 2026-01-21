@@ -304,7 +304,6 @@ module SyncDefaultGems
     time: lib("ruby/time"),
     timeout: lib("ruby/timeout"),
     tmpdir: lib("ruby/tmpdir"),
-    tsort: lib("ruby/tsort"),
     un: lib("ruby/un"),
     uri: lib("ruby/uri", gemspec_in_subdir: true),
     weakref: lib("ruby/weakref"),
@@ -440,7 +439,7 @@ module SyncDefaultGems
   end
 
   def check_prerelease_version(gem)
-    return if ["rubygems", "mmtk", "cgi", "pathname"].include?(gem)
+    return if ["rubygems", "mmtk", "cgi", "pathname", "Onigmo"].include?(gem)
 
     require "net/https"
     require "json"
@@ -862,13 +861,10 @@ module SyncDefaultGems
       REPOSITORIES.each_key {|gem| update_default_gems(gem)}
     end
   when "all"
-    if ARGV[1] == "release"
-      REPOSITORIES.each_key do |gem|
-        update_default_gems(gem, release: true)
-        sync_default_gems(gem)
-      end
-    else
-      REPOSITORIES.each_key {|gem| sync_default_gems(gem)}
+    REPOSITORIES.each_key do |gem|
+      next if ["Onigmo"].include?(gem)
+      update_default_gems(gem, release: true) if ARGV[1] == "release"
+      sync_default_gems(gem)
     end
   when "list"
     ARGV.shift
