@@ -91,6 +91,7 @@ fn profile_insn(bare_opcode: ruby_vminsn_type, ec: EcPtr) {
         YARVINSN_opt_size      => profile_operands(profiler, profile, 1),
         YARVINSN_opt_succ      => profile_operands(profiler, profile, 1),
         YARVINSN_invokeblock   => profile_block_handler(profiler, profile),
+        YARVINSN_getblockparamproxy => profile_getblockparamproxy(profiler, profile),
         YARVINSN_invokesuper   => profile_invokesuper(profiler, profile),
         YARVINSN_opt_send_without_block | YARVINSN_send => {
             let cd: *const rb_call_data = profiler.insn_opnd(0).as_ptr();
@@ -155,27 +156,28 @@ fn profile_block_handler(profiler: &mut Profiler, profile: &mut IseqProfile) {
     types[0].observe(ty);
 }
 
+fn profile_getblockparamproxy(profiler: &mut Profiler, profile: &mut IseqProfile) {
+    let types = &mut profile.opnd_types[profiler.insn_idx];
+    if types.is_empty() {
+        types.resize(1, TypeDistribution::new());
+    }
+
+    let level = profiler.insn_opnd(1).as_u32();
+    let ep = unsafe { get_cfp_ep_level(profiler.cfp, level) };
+    let block_handler = unsafe { *ep.offset(VM_ENV_DATA_INDEX_SPECVAL as isize) };
+    let untagged = unsafe { rb_vm_untag_block_handler(block_handler) };
+
+    let ty = ProfiledType::object(untagged);
+    VALUE::from(profiler.iseq).write_barrier(ty.class());
+    types[0].observe(ty);
+}
+
 fn profile_invokesuper(profiler: &mut Profiler, profile: &mut IseqProfile) {
     let cme = unsafe { rb_vm_frame_method_entry(profiler.cfp) };
     let cme_value = VALUE(cme as usize);  // CME is a T_IMEMO, which is a VALUE
 
-    match profile.super_cme.get(&profiler.insn_idx) {
-        None => {
-            // If `None`, then this is our first time looking at `super` for this instruction.
-            profile.super_cme.insert(profiler.insn_idx, Some(cme_value));
-        },
-        Some(Some(existing_cme)) => {
-            // Check if the stored method entry is the same as the current one. If it isn't, then
-            // mark the call site as polymorphic.
-            if *existing_cme != cme_value {
-                profile.super_cme.insert(profiler.insn_idx, None);
-            }
-        }
-        Some(None) => {
-            // We've visited this instruction and explicitly stored `None` to mark the call site
-            // as polymorphic.
-        }
-    }
+    profile.super_cme.entry(profiler.insn_idx)
+        .or_insert_with(|| TypeDistribution::new()).observe(ProfiledType::object(cme_value));
 
     unsafe { rb_gc_writebarrier(profiler.iseq.into(), cme_value) };
 
@@ -359,7 +361,7 @@ pub struct IseqProfile {
     num_profiles: Vec<NumProfiles>,
 
     /// Method entries for `super` calls (stored as VALUE to be GC-safe)
-    super_cme: HashMap<usize, Option<VALUE>>
+    super_cme: HashMap<usize, TypeDistribution>
 }
 
 impl IseqProfile {
@@ -377,8 +379,14 @@ impl IseqProfile {
     }
 
     pub fn get_super_method_entry(&self, insn_idx: usize) -> Option<*const rb_callable_method_entry_t> {
-        self.super_cme.get(&insn_idx)
-            .and_then(|opt| opt.map(|v| v.0 as *const rb_callable_method_entry_t))
+        let Some(entry) = self.super_cme.get(&insn_idx) else { return None };
+        let summary = TypeDistributionSummary::new(entry);
+
+        if summary.is_monomorphic() {
+            Some(summary.bucket(0).class.0 as *const rb_callable_method_entry_t)
+        } else {
+            None
+        }
     }
 
     /// Run a given callback with every object in IseqProfile
@@ -392,9 +400,9 @@ impl IseqProfile {
             }
         }
 
-        for cme_value in self.super_cme.values() {
-            if let Some(cme) = cme_value {
-                callback(*cme);
+        for super_cme_values in self.super_cme.values() {
+            for profiled_type in super_cme_values.each_item() {
+                callback(profiled_type.class)
             }
         }
     }
@@ -411,9 +419,9 @@ impl IseqProfile {
         }
 
         // Update CME references if they move during compaction.
-        for cme_value in self.super_cme.values_mut() {
-            if let Some(cme) = cme_value {
-                callback(cme);
+        for super_cme_values in self.super_cme.values_mut() {
+            for ref mut profiled_type in super_cme_values.each_item_mut() {
+                callback(&mut profiled_type.class)
             }
         }
     }

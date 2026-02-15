@@ -30,6 +30,7 @@
 #include "internal/compilers.h"
 #include "internal/complex.h"
 #include "internal/enumerator.h"
+#include "internal/error.h"
 #include "internal/gc.h"
 #include "internal/hash.h"
 #include "internal/numeric.h"
@@ -3102,7 +3103,7 @@ rb_num2long(VALUE val)
 {
   again:
     if (NIL_P(val)) {
-        rb_raise(rb_eTypeError, "no implicit conversion from nil to integer");
+        rb_no_implicit_conversion(val, "Integer");
     }
 
     if (FIXNUM_P(val)) return FIX2LONG(val);
@@ -3130,7 +3131,7 @@ rb_num2ulong_internal(VALUE val, int *wrap_p)
 {
   again:
     if (NIL_P(val)) {
-       rb_raise(rb_eTypeError, "no implicit conversion of nil into Integer");
+        rb_no_implicit_conversion(val, "Integer");
     }
 
     if (FIXNUM_P(val)) {
@@ -3373,7 +3374,7 @@ LONG_LONG
 rb_num2ll(VALUE val)
 {
     if (NIL_P(val)) {
-        rb_raise(rb_eTypeError, "no implicit conversion from nil");
+        rb_no_implicit_conversion(val, "Integer");
     }
 
     if (FIXNUM_P(val)) return (LONG_LONG)FIX2LONG(val);
@@ -3390,11 +3391,8 @@ rb_num2ll(VALUE val)
     else if (RB_BIGNUM_TYPE_P(val)) {
         return rb_big2ll(val);
     }
-    else if (RB_TYPE_P(val, T_STRING)) {
-        rb_raise(rb_eTypeError, "no implicit conversion from string");
-    }
-    else if (RB_TYPE_P(val, T_TRUE) || RB_TYPE_P(val, T_FALSE)) {
-        rb_raise(rb_eTypeError, "no implicit conversion from boolean");
+    else if (val == Qfalse || val == Qtrue || RB_TYPE_P(val, T_STRING)) {
+        rb_no_implicit_conversion(val, "Integer");
     }
 
     val = rb_to_int(val);
@@ -3405,7 +3403,7 @@ unsigned LONG_LONG
 rb_num2ull(VALUE val)
 {
     if (NIL_P(val)) {
-        rb_raise(rb_eTypeError, "no implicit conversion of nil into Integer");
+        rb_no_implicit_conversion(val, "Integer");
     }
     else if (FIXNUM_P(val)) {
         return (LONG_LONG)FIX2LONG(val); /* this is FIX2LONG, intended */
@@ -3680,9 +3678,9 @@ rb_int128_to_numeric(rb_int128_t n)
  * First, what's elsewhere. Class \Integer:
  *
  * - Inherits from
- *   {class Numeric}[rdoc-ref:Numeric@What-27s+Here]
- *   and {class Object}[rdoc-ref:Object@What-27s+Here].
- * - Includes {module Comparable}[rdoc-ref:Comparable@What-27s+Here].
+ *   {class Numeric}[rdoc-ref:Numeric@Whats+Here]
+ *   and {class Object}[rdoc-ref:Object@Whats+Here].
+ * - Includes {module Comparable}[rdoc-ref:Comparable@Whats+Here].
  *
  * Here, class \Integer provides methods for:
  *
@@ -6365,8 +6363,8 @@ int_s_try_convert(VALUE self, VALUE num)
  *
  * First, what's elsewhere. Class \Numeric:
  *
- * - Inherits from {class Object}[rdoc-ref:Object@What-27s+Here].
- * - Includes {module Comparable}[rdoc-ref:Comparable@What-27s+Here].
+ * - Inherits from {class Object}[rdoc-ref:Object@Whats+Here].
+ * - Includes {module Comparable}[rdoc-ref:Comparable@Whats+Here].
  *
  * Here, class \Numeric provides methods for:
  *

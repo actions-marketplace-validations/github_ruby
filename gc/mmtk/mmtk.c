@@ -439,16 +439,15 @@ rb_mmtk_update_global_tables_replace_i(VALUE *ptr, void *data)
 }
 
 static void
-rb_mmtk_update_global_tables(int table)
+rb_mmtk_update_global_tables(int table, bool moving)
 {
     MMTK_ASSERT(table < RB_GC_VM_WEAK_TABLE_COUNT);
 
-    // TODO: set weak_only to true for non-moving GC
     rb_gc_vm_weak_table_foreach(
         rb_mmtk_update_global_tables_i,
         rb_mmtk_update_global_tables_replace_i,
         NULL,
-        false,
+        !moving,
         (enum rb_gc_vm_weak_tables)table
     );
 }
@@ -1411,6 +1410,7 @@ enum gc_stat_sym {
     gc_stat_sym_free_bytes,
     gc_stat_sym_starting_heap_address,
     gc_stat_sym_last_heap_address,
+    gc_stat_sym_weak_references_count,
     gc_stat_sym_last
 };
 
@@ -1429,6 +1429,7 @@ setup_gc_stat_symbols(void)
         S(free_bytes);
         S(starting_heap_address);
         S(last_heap_address);
+        S(weak_references_count);
     }
 }
 
@@ -1464,6 +1465,7 @@ rb_gc_impl_stat(void *objspace_ptr, VALUE hash_or_sym)
         SET(free_bytes, mmtk_free_bytes());
         SET(starting_heap_address, (size_t)mmtk_starting_heap_address());
         SET(last_heap_address, (size_t)mmtk_last_heap_address());
+        SET(weak_references_count, mmtk_weak_references_count());
 #undef SET
 
     if (!NIL_P(key)) {

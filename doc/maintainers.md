@@ -50,6 +50,10 @@ consensus on ruby-core/ruby-dev.
 
 * *No maintainer*
 
+#### lib/pathname.rb
+
+* Tanaka Akira ([akr])
+
 #### lib/rubygems.rb, lib/rubygems/*
 
 * Hiroshi SHIBATA ([hsbt])
@@ -218,6 +222,7 @@ consensus on ruby-core/ruby-dev.
 * Kevin Newton ([kddnewton])
 * Eileen Uchitelle ([eileencodes])
 * Aaron Patterson ([tenderlove])
+* Earlopain ([earlopain])
 * https://github.com/ruby/prism
 * https://rubygems.org/gems/prism
 
@@ -349,12 +354,6 @@ consensus on ruby-core/ruby-dev.
 * Kazuki Yamaguchi ([rhenium])
 * https://github.com/ruby/openssl
 * https://rubygems.org/gems/openssl
-
-#### ext/pathname
-
-* Tanaka Akira ([akr])
-* https://github.com/ruby/pathname
-* https://rubygems.org/gems/pathname
 
 #### ext/psych
 
@@ -675,6 +674,7 @@ It may needs to make consensus on ruby-core/ruby-dev before making major changes
 [colby-swandale]: https://github.com/colby-swandale
 [drbrain]: https://github.com/drbrain
 [duerst]: https://github.com/duerst
+[earlopain]: https://github.com/earlopain
 [eban]: https://github.com/eban
 [eileencodes]: https://github.com/eileencodes
 [hasumikin]: https://github.com/hasumikin
