@@ -286,7 +286,9 @@ module Prism
         case param
         when MultiTargetNode
           names << [:req]
-        when NoKeywordsParameterNode, KeywordRestParameterNode, ForwardingParameterNode
+        when NoKeywordsParameterNode, KeywordRestParameterNode,
+            NoBlockParameterNode, BlockParameterNode,
+            ForwardingParameterNode
           # Invalid syntax, e.g. "def f(**nil, ...)" moves the NoKeywordsParameterNode to posts
           raise "Invalid syntax"
         else
@@ -316,7 +318,13 @@ module Prism
         names << [:nokey]
       end
 
-      names << [:block, block.name || :&] if block
+      case block
+      when BlockParameterNode
+        names << [:block, block.name || :&]
+      when NoBlockParameterNode
+        names << [:noblock]
+      end
+
       names
     end
   end

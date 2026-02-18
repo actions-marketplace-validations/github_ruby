@@ -482,10 +482,10 @@ fn gen_insn(cb: &mut CodeBlock, jit: &mut JITState, asm: &mut Assembler, functio
         Insn::ToRegexp { opt, values, state } => gen_toregexp(jit, asm, *opt, opnds!(values), &function.frame_state(*state)),
         Insn::Param => unreachable!("block.insns should not have Insn::Param"),
         Insn::Snapshot { .. } => return Ok(()), // we don't need to do anything for this instruction at the moment
-        &Insn::Send { cd, blockiseq, state, reason, .. } => gen_send(jit, asm, cd, blockiseq, &function.frame_state(state), reason),
+        &Insn::Send { cd, blockiseq: None, state, reason, .. } => gen_send_without_block(jit, asm, cd, &function.frame_state(state), reason),
+        &Insn::Send { cd, blockiseq: Some(blockiseq), state, reason, .. } => gen_send(jit, asm, cd, blockiseq, &function.frame_state(state), reason),
         &Insn::SendForward { cd, blockiseq, state, reason, .. } => gen_send_forward(jit, asm, cd, blockiseq, &function.frame_state(state), reason),
         Insn::SendDirect { cme, iseq, recv, args, kw_bits, blockiseq, state, .. } => gen_send_iseq_direct(cb, jit, asm, *cme, *iseq, opnd!(recv), opnds!(args), *kw_bits, &function.frame_state(*state), *blockiseq),
-        &Insn::SendWithoutBlock { cd, state, reason, .. } => gen_send_without_block(jit, asm, cd, &function.frame_state(state), reason),
         &Insn::InvokeSuper { cd, blockiseq, state, reason, .. } => gen_invokesuper(jit, asm, cd, blockiseq, &function.frame_state(state), reason),
         &Insn::InvokeSuperForward { cd, blockiseq, state, reason, .. } => gen_invokesuperforward(jit, asm, cd, blockiseq, &function.frame_state(state), reason),
         &Insn::InvokeBlock { cd, state, reason, .. } => gen_invokeblock(jit, asm, cd, &function.frame_state(state), reason),
@@ -3104,35 +3104,5 @@ impl IseqCall {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::codegen::MAX_ISEQ_VERSIONS;
-    use crate::cruby::test_utils::*;
-    use crate::payload::*;
-
-    #[test]
-    fn test_max_iseq_versions() {
-        eval(&format!("
-            TEST = -1
-            def test = TEST
-
-            # compile and invalidate MAX+1 times
-            i = 0
-            while i < {MAX_ISEQ_VERSIONS} + 1
-              test; test # compile a version
-
-              Object.send(:remove_const, :TEST)
-              TEST = i
-
-              i += 1
-            end
-        "));
-
-        // It should not exceed MAX_ISEQ_VERSIONS
-        let iseq = get_method_iseq("self", "test");
-        let payload = get_or_create_iseq_payload(iseq);
-        assert_eq!(payload.versions.len(), MAX_ISEQ_VERSIONS);
-
-        // The last call should not discard the JIT code
-        assert!(matches!(unsafe { payload.versions.last().unwrap().as_ref() }.status, IseqStatus::Compiled(_)));
-    }
-}
+#[path = "codegen_tests.rs"]
+mod tests;

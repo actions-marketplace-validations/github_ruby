@@ -91,13 +91,11 @@ MAKE_ENC      = -f $(ENC_MK) V="$(V)" UNICODE_HDR_DIR="$(UNICODE_HDR_DIR)" \
 PRISM_BUILD_DIR = prism
 
 PRISM_FILES = prism/api_node.$(OBJEXT) \
-		prism/api_pack.$(OBJEXT) \
 		prism/diagnostic.$(OBJEXT) \
 		prism/encoding.$(OBJEXT) \
 		prism/extension.$(OBJEXT) \
 		prism/node.$(OBJEXT) \
 		prism/options.$(OBJEXT) \
-		prism/pack.$(OBJEXT) \
 		prism/prettyprint.$(OBJEXT) \
 		prism/regexp.$(OBJEXT) \
 		prism/serialize.$(OBJEXT) \
@@ -107,9 +105,9 @@ PRISM_FILES = prism/api_node.$(OBJEXT) \
 		prism/util/pm_char.$(OBJEXT) \
 		prism/util/pm_constant_pool.$(OBJEXT) \
 		prism/util/pm_integer.$(OBJEXT) \
+		prism/util/pm_line_offset_list.$(OBJEXT) \
 		prism/util/pm_list.$(OBJEXT) \
 		prism/util/pm_memchr.$(OBJEXT) \
-		prism/util/pm_newline_list.$(OBJEXT) \
 		prism/util/pm_string.$(OBJEXT) \
 		prism/util/pm_strncasecmp.$(OBJEXT) \
 		prism/util/pm_strpbrk.$(OBJEXT) \
