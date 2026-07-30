@@ -145,11 +145,11 @@ require 'json/common'
 #   # warning: detected duplicate keys in JSON object.
 #   # This will raise an error in json 3.0 unless enabled via `allow_duplicate_key: true`
 #
-# When set to `+true+`
+# When set to +true+:
 #   # The last value is used.
 #   JSON.parse('{"a": 1, "a":2}') => {"a" => 2}
 #
-# When set to `+false+`, the future default:
+# When set to +false+, the future default:
 #   JSON.parse('{"a": 1, "a":2}') => duplicate key at line 1 column 1 (JSON::ParserError)
 #
 # ---
@@ -184,6 +184,20 @@ require 'json/common'
 #
 # ---
 #
+# Option +allow_comments+ (boolean) specifies whether to allow
+# JavaScript style comments (either <tt>// comment</tt> or <tt>/* comment */</tt>);
+# defaults to +false+.
+#
+# When not specified, a deprecation warning is emitted if a comment is encountered.
+#
+# When set to +true+, comments are ignored:
+#   JSON.parse('/* comment */ {"a": 1, "a":2}') # => {"a" => 2}
+#
+# When set to +false+, the future default:
+#   JSON.parse('/* comment */ {"a": 1, "a":2}') # unexpected character: '/' at line 1 column 1 (JSON::ParserError)
+#
+# ---
+#
 # Option +allow_control_characters+ (boolean) specifies whether to allow
 # unescaped ASCII control characters, such as newlines, in strings;
 # defaults to +false+.
@@ -193,6 +207,18 @@ require 'json/common'
 #
 # When enabled:
 #   JSON.parse(%{"Hello\nWorld"}, allow_control_characters: true) # => "Hello\nWorld"
+#
+# ---
+#
+# Option +allow_invalid_escape+ (boolean) specifies whether to ignore backslahes that are followed
+# by an invalid escape character in strings;
+# defaults to +false+.
+#
+# With the default, +false+:
+#   JSON.parse('"Hell\o"') # invalid escape character in string (JSON::ParserError)
+#
+# When enabled:
+#   JSON.parse('"Hell\o"', allow_invalid_escape: true) # => "Hello"
 #
 # ====== Output Options
 #
@@ -323,8 +349,8 @@ require 'json/common'
 #   JSON.generate(JSON::MinusInfinity)
 #
 # Allow:
-#   ruby = [Float::NaN, Float::Infinity, Float::MinusInfinity]
-#   JSON.generate(ruby, allow_nan: true) # => '[NaN,Infinity,-Infinity]'
+#   ruby = [Float::NAN, Float::INFINITY, JSON::NaN, JSON::Infinity, JSON::MinusInfinity]
+#   JSON.generate(ruby, allow_nan: true) # => '[NaN,Infinity,NaN,Infinity,-Infinity]'
 #
 # ---
 #

@@ -1585,24 +1585,55 @@ dir_chdir(VALUE dir)
 #endif
 }
 
+static VALUE last_cwd;
+
 #ifndef _WIN32
+static VALUE
+getcwd_to_str(VALUE arg)
+{
+    const char *path = (const char *)arg;
+#ifdef __APPLE__
+    return rb_str_normalize_ospath(path, strlen(path));
+#else
+    return rb_str_new2(path);
+#endif
+}
+
+static VALUE
+getcwd_xfree(VALUE arg)
+{
+    xfree((void *)arg);
+    return Qnil;
+}
+
+static VALUE
+rb_dir_getwd_ospath_slowpath(void)
+{
+    char *path = ruby_getcwd();
+    return rb_ensure(getcwd_to_str, (VALUE)path, getcwd_xfree, (VALUE)path);
+}
+
 VALUE
 rb_dir_getwd_ospath(void)
 {
-    char *path;
-    VALUE cwd;
-    VALUE path_guard;
+    char buf[PATH_MAX];
+    char *path = getcwd(buf, PATH_MAX);
+    if (!path) {
+        return rb_dir_getwd_ospath_slowpath();
+    }
 
-    path_guard = rb_imemo_tmpbuf_new();
-    path = ruby_getcwd();
-    rb_imemo_tmpbuf_set_ptr(path_guard, path);
+    VALUE cached_cwd = RUBY_ATOMIC_VALUE_LOAD(last_cwd);
+
+    if (!cached_cwd || strcmp(RSTRING_PTR(cached_cwd), path) != 0) {
 #ifdef __APPLE__
-    cwd = rb_str_normalize_ospath(path, strlen(path));
+        cached_cwd = rb_str_normalize_ospath(path, strlen(path));
 #else
-    cwd = rb_str_new2(path);
+        cached_cwd = rb_str_new2(path);
 #endif
-    rb_free_tmp_buffer(&path_guard);
-    return cwd;
+        rb_str_freeze(cached_cwd);
+        RUBY_ATOMIC_VALUE_SET(last_cwd, cached_cwd);
+    }
+    return cached_cwd;
 }
 #endif
 
@@ -1611,7 +1642,7 @@ rb_dir_getwd(void)
 {
     rb_encoding *fs = rb_filesystem_encoding();
     int fsenc = rb_enc_to_index(fs);
-    VALUE cwd = rb_dir_getwd_ospath();
+    VALUE cwd = rb_str_new_shared(rb_dir_getwd_ospath());
 
     switch (fsenc) {
       case ENCINDEX_US_ASCII:
@@ -2772,8 +2803,10 @@ glob_opendir(ruby_glob_entries_t *ent, DIR *dirp, int flags, rb_encoding *enc)
             }
             if (count >= capacity) {
                 capacity += 256;
-                if (!(newp = GLOB_REALLOC_N(ent->sort.entries, capacity)))
+                if (!(newp = GLOB_REALLOC_N(ent->sort.entries, capacity))) {
+                    GLOB_FREE(rdp);
                     goto nomem;
+                }
                 ent->sort.entries = newp;
             }
             ent->sort.entries[count++] = rdp;
@@ -4002,6 +4035,7 @@ Init_Dir(void)
 
     rb_gc_register_address(&chdir_lock.path);
     rb_gc_register_address(&chdir_lock.thread);
+    rb_gc_register_address(&last_cwd);
 
     rb_cDir = rb_define_class("Dir", rb_cObject);
 

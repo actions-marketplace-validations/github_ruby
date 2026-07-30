@@ -897,10 +897,12 @@ class TestFileExhaustive < Test::Unit::TestCase
     bug9934 = '[ruby-core:63114] [Bug #9934]'
     require "objspace"
     path = File.expand_path("/foo")
-    assert_operator(ObjectSpace.memsize_of(path), :<=, path.bytesize + GC::INTERNAL_CONSTANTS[:BASE_SLOT_SIZE], bug9934)
+    slot_size = Integer(ObjectSpace.dump(path)[/"slot_size":(\d+)/, 1])
+    assert_operator(ObjectSpace.memsize_of(path), :<=, path.bytesize + slot_size, bug9934)
     path = File.expand_path("/a"*25)
+    slot_size = Integer(ObjectSpace.dump(path)[/"slot_size":(\d+)/, 1])
     assert_operator(ObjectSpace.memsize_of(path), :<=,
-                    (path.bytesize + 1) * 2 + GC::INTERNAL_CONSTANTS[:BASE_SLOT_SIZE], bug9934)
+                    (path.bytesize + 1) * 2 + slot_size, bug9934)
   end
 
   def test_expand_path_encoding
@@ -1358,14 +1360,19 @@ class TestFileExhaustive < Test::Unit::TestCase
   end
 
   def test_join
-    s = "foo" + File::SEPARATOR + "bar" + File::SEPARATOR + "baz"
+    sep = File::SEPARATOR
+    s = "foo" + sep + "bar" + sep + "baz"
     assert_equal(s, File.join("foo", "bar", "baz"))
     assert_equal(s, File.join(["foo", "bar", "baz"]))
+    assert_equal(s, File.join("foo" + sep, "bar", sep + "baz"))
+    assert_equal(s, File.join("foo" + sep, sep + "bar" + sep, sep + "baz"))
 
     o = Object.new
     def o.to_path; "foo"; end
     assert_equal(s, File.join(o, "bar", "baz"))
-    assert_equal(s, File.join("foo" + File::SEPARATOR, "bar", File::SEPARATOR + "baz"))
+
+    s = sep + "foo"
+    assert_equal(s, File.join(sep, s))
   end
 
   def test_join_alt_separator

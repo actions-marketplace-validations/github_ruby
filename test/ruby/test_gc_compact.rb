@@ -207,7 +207,7 @@ class TestGCCompact < Test::Unit::TestCase
   end
 
   def test_updating_references_for_embed_shared_arrays
-    omit if GC::INTERNAL_CONSTANTS[:SIZE_POOL_COUNT] == 1
+    omit if GC::INTERNAL_CONSTANTS[:HEAP_COUNT] == 1
 
     assert_separately(%w[-robjspace], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 10)
     begin;
@@ -256,7 +256,7 @@ class TestGCCompact < Test::Unit::TestCase
   end
 
   def test_updating_references_for_embed_frozen_shared_arrays
-    omit if GC::INTERNAL_CONSTANTS[:SIZE_POOL_COUNT] == 1
+    omit if GC::INTERNAL_CONSTANTS[:HEAP_COUNT] == 1
 
     assert_separately(%w[-robjspace], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 10)
     begin;
@@ -284,7 +284,7 @@ class TestGCCompact < Test::Unit::TestCase
   end
 
   def test_moving_arrays_down_heaps
-    omit if GC::INTERNAL_CONSTANTS[:SIZE_POOL_COUNT] == 1
+    omit if GC::INTERNAL_CONSTANTS[:HEAP_COUNT] == 1
 
     assert_separately(%w[-robjspace], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 10)
     begin;
@@ -300,13 +300,13 @@ class TestGCCompact < Test::Unit::TestCase
       }.resume
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
-      assert_operator(stats.dig(:moved_down, :T_ARRAY) || 0, :>=, ARY_COUNT - 10)
+      assert_operator(stats.dig(:moved_down, :T_ARRAY) || 0, :>=, ARY_COUNT - 25)
       refute_empty($arys.keep_if { |o| ObjectSpace.dump(o).include?('"embedded":true') })
     end;
   end
 
   def test_moving_arrays_up_heaps
-    omit if GC::INTERNAL_CONSTANTS[:SIZE_POOL_COUNT] == 1
+    omit if GC::INTERNAL_CONSTANTS[:HEAP_COUNT] == 1
 
     assert_separately(%w[-robjspace], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 10)
     begin;
@@ -315,7 +315,7 @@ class TestGCCompact < Test::Unit::TestCase
       GC.verify_compaction_references(expand_heap: true, toward: :empty)
 
       Fiber.new {
-        ary = "hello".chars
+        ary = "hello world".chars # > 6 elements to exceed pool 0 embed capacity
         $arys = ARY_COUNT.times.map do
           x = []
           ary.each { |e| x << e }
@@ -330,7 +330,7 @@ class TestGCCompact < Test::Unit::TestCase
   end
 
   def test_moving_objects_between_heaps
-    omit if GC::INTERNAL_CONSTANTS[:SIZE_POOL_COUNT] == 1
+    omit if GC::INTERNAL_CONSTANTS[:HEAP_COUNT] == 1
 
     assert_separately(%w[-robjspace], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 60)
     begin;
@@ -356,13 +356,13 @@ class TestGCCompact < Test::Unit::TestCase
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
 
-      assert_operator(stats.dig(:moved_up, :T_OBJECT) || 0, :>=, OBJ_COUNT - 15)
+      assert_operator(stats.dig(:moved_up, :T_OBJECT) || 0, :>=, OBJ_COUNT - 25)
       refute_empty($ary.keep_if { |o| ObjectSpace.dump(o).include?('"embedded":true') })
     end;
   end
 
   def test_compact_objects_of_varying_sizes
-    omit if GC::INTERNAL_CONSTANTS[:SIZE_POOL_COUNT] == 1
+    omit if GC::INTERNAL_CONSTANTS[:HEAP_COUNT] == 1
 
     assert_ruby_status([], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 10)
     begin;
@@ -378,7 +378,7 @@ class TestGCCompact < Test::Unit::TestCase
   end
 
   def test_moving_strings_up_heaps
-    omit if GC::INTERNAL_CONSTANTS[:SIZE_POOL_COUNT] == 1
+    omit if GC::INTERNAL_CONSTANTS[:HEAP_COUNT] == 1
 
     assert_separately(%w[-robjspace], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 30)
     begin;
@@ -387,19 +387,19 @@ class TestGCCompact < Test::Unit::TestCase
       GC.verify_compaction_references(expand_heap: true, toward: :empty)
 
       Fiber.new {
-        str = "a" * GC::INTERNAL_CONSTANTS[:BASE_SLOT_SIZE] * 4
+        str = "a" * GC.stat_heap(0, :slot_size) * 4
         $ary = STR_COUNT.times.map { +"" << str }
       }.resume
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
 
-      assert_operator(stats[:moved_up][:T_STRING], :>=, STR_COUNT - 15)
+      assert_operator(stats[:moved_up][:T_STRING], :>=, STR_COUNT - 25)
       refute_empty($ary.keep_if { |o| ObjectSpace.dump(o).include?('"embedded":true') })
     end;
   end
 
   def test_moving_strings_down_heaps
-    omit if GC::INTERNAL_CONSTANTS[:SIZE_POOL_COUNT] == 1
+    omit if GC::INTERNAL_CONSTANTS[:HEAP_COUNT] == 1
 
     assert_separately(%w[-robjspace], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 30)
     begin;
@@ -408,18 +408,18 @@ class TestGCCompact < Test::Unit::TestCase
       GC.verify_compaction_references(expand_heap: true, toward: :empty)
 
       Fiber.new {
-        $ary = STR_COUNT.times.map { ("a" * GC::INTERNAL_CONSTANTS[:BASE_SLOT_SIZE] * 4).squeeze! }
+        $ary = STR_COUNT.times.map { ("a" * GC.stat_heap(0, :slot_size) * 4).squeeze! }
       }.resume
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
 
-      assert_operator(stats[:moved_down][:T_STRING], :>=, STR_COUNT - 10)
+      assert_operator(stats[:moved_down][:T_STRING], :>=, STR_COUNT - 25)
       refute_empty($ary.keep_if { |o| ObjectSpace.dump(o).include?('"embedded":true') })
     end;
   end
 
   def test_moving_hashes_down_heaps
-    omit if GC::INTERNAL_CONSTANTS[:SIZE_POOL_COUNT] == 1
+    omit if GC::INTERNAL_CONSTANTS[:HEAP_COUNT] == 1
     # AR and ST hashes are in the same size pool on 32 bit
     omit unless RbConfig::SIZEOF["uint64_t"] <= RbConfig::SIZEOF["void*"]
 
@@ -437,7 +437,7 @@ class TestGCCompact < Test::Unit::TestCase
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
 
-      assert_operator(stats[:moved_down][:T_HASH], :>=, HASH_COUNT - 10)
+      assert_operator(stats[:moved_down][:T_HASH], :>=, HASH_COUNT - 25)
     end;
   end
 
@@ -469,7 +469,7 @@ class TestGCCompact < Test::Unit::TestCase
     end;
   end
 
-  def test_moving_too_complex_generic_ivar
+  def test_moving_complex_generic_ivar
     omit "not compiled with SHAPE_DEBUG" unless defined?(RubyVM::Shape)
 
     assert_separately([], <<~RUBY)

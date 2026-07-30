@@ -2204,7 +2204,7 @@ check_exec_options_i(st_data_t st_key, st_data_t st_val, st_data_t arg)
         if (SYMBOL_P(key))
             rb_raise(rb_eArgError, "wrong exec option symbol: % "PRIsVALUE,
                      key);
-        rb_raise(rb_eArgError, "wrong exec option");
+        rb_raise(rb_eArgError, "wrong exec option: %"PRIsVALUE, rb_obj_class(key));
     }
     return ST_CONTINUE;
 }
@@ -2726,9 +2726,7 @@ open_func(void *ptr)
 static void
 rb_execarg_allocate_dup2_tmpbuf(struct rb_execarg *eargp, long len)
 {
-    VALUE tmpbuf = rb_imemo_tmpbuf_new();
-    rb_imemo_tmpbuf_set_ptr(tmpbuf, ruby_xmalloc(run_exec_dup2_tmpbuf_size(len)));
-    eargp->dup2_tmpbuf = tmpbuf;
+    rb_alloc_tmp_buffer(&eargp->dup2_tmpbuf, run_exec_dup2_tmpbuf_size(len));
 }
 
 static VALUE
@@ -2890,7 +2888,6 @@ void
 rb_execarg_parent_end(VALUE execarg_obj)
 {
     execarg_parent_end(execarg_obj);
-    RB_GC_GUARD(execarg_obj);
 }
 
 static void
@@ -3183,8 +3180,7 @@ run_exec_dup2(VALUE ary, VALUE tmpbuf, struct rb_execarg *sargp, char *errmsg, s
     long n, i;
     int ret;
     int extra_fd = -1;
-    struct rb_imemo_tmpbuf_struct *buf = (void *)tmpbuf;
-    struct run_exec_dup2_fd_pair *pairs = (void *)buf->ptr;
+    struct run_exec_dup2_fd_pair *pairs = RB_IMEMO_TMPBUF_PTR(tmpbuf);
 
     n = RARRAY_LEN(ary);
 

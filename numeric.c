@@ -75,6 +75,8 @@
 #define DBL_EPSILON 2.2204460492503131e-16
 #endif
 
+#define ACCURATE_POW10(ndigits) ((ndigits) < DBL_DIG)
+
 #ifndef USE_RB_INFINITY
 #elif !defined(WORDS_BIGENDIAN) /* BYTE_ORDER == LITTLE_ENDIAN */
 const union bytesequence4_or_float rb_infinity = {{0x00, 0x00, 0x80, 0x7f}};
@@ -492,7 +494,7 @@ rb_num_coerce_cmp(VALUE x, VALUE y, ID func)
 static VALUE
 ensure_cmp(VALUE c, VALUE x, VALUE y)
 {
-    if (NIL_P(c)) rb_cmperr(x, y);
+    if (NIL_P(c)) rb_cmperr_reason(x, y, "comparator returned nil");
     return c;
 }
 
@@ -502,7 +504,7 @@ rb_num_coerce_relop(VALUE x, VALUE y, ID func)
     VALUE x0 = x, y0 = y;
 
     if (!do_coerce(&x, &y, FALSE)) {
-        rb_cmperr(x0, y0);
+        rb_cmperr_reason(x0, y0, "coercion was not possible");
         UNREACHABLE_RETURN(Qnil);
     }
     return ensure_cmp(rb_funcall(x, func, 1, y), x0, y0);
@@ -910,7 +912,7 @@ num_negative_p(VALUE num)
 VALUE
 rb_float_new_in_heap(double d)
 {
-    NEWOBJ_OF(flt, struct RFloat, rb_cFloat, T_FLOAT | (RGENGC_WB_PROTECTED_FLOAT ? FL_WB_PROTECTED : 0), sizeof(struct RFloat), 0);
+    NEWOBJ_OF(flt, struct RFloat, rb_cFloat, T_FLOAT, sizeof(struct RFloat));
 
 #if SIZEOF_DOUBLE <= SIZEOF_VALUE
     flt->float_value = d;
@@ -2018,6 +2020,9 @@ rb_float_floor(VALUE num, int ndigits)
         if (float_round_overflow(ndigits, binexp)) return num;
         if (number > 0.0 && float_round_underflow(ndigits, binexp))
             return DBL2NUM(0.0);
+        if (!ACCURATE_POW10(ndigits)) {
+            return rb_flo_floor_by_rational(num, ndigits);
+        }
         f = pow(10, ndigits);
         mul = floor(number * f);
         res = (mul + 1) / f;
@@ -2226,6 +2231,9 @@ rb_float_ceil(VALUE num, int ndigits)
         if (float_round_overflow(ndigits, binexp)) return num;
         if (number < 0.0 && float_round_underflow(ndigits, binexp))
             return DBL2NUM(0.0);
+        if (!ACCURATE_POW10(ndigits)) {
+            return rb_flo_ceil_by_rational(num, ndigits);
+        }
         f = pow(10, ndigits);
         f = ceil(number * f) / f;
         return DBL2NUM(f);
@@ -2490,9 +2498,8 @@ flo_round(int argc, VALUE *argv, VALUE num)
         frexp(number, &binexp);
         if (float_round_overflow(ndigits, binexp)) return num;
         if (float_round_underflow(ndigits, binexp)) return DBL2NUM(0);
-        if (ndigits > 14) {
-            /* In this case, pow(10, ndigits) may not be accurate. */
-            return rb_flo_round_by_rational(argc, argv, num);
+        if (!ACCURATE_POW10(ndigits)) {
+            return rb_flo_round_by_rational(num, ndigits, mode);
         }
         f = pow(10, ndigits);
         x = ROUND_CALL(mode, round, (number, f));
@@ -2563,6 +2570,12 @@ flo_to_i(VALUE num)
     if (f < 0.0) f = ceil(f);
 
     return dbl2ival(f);
+}
+
+VALUE
+rb_flo_to_i(VALUE num)
+{
+    return flo_to_i(num);
 }
 
 /*
@@ -4034,6 +4047,11 @@ rb_int_uminus(VALUE num)
     }
 }
 
+/* ruby_decimal_digit_pairs is defined in bignum.c and declared in
+ * internal/bignum.h.  See there for the rationale of the 2-digit
+ * lookup-table itoa optimisation; both rb_fix2str here and big2str_2bdigits
+ * in bignum.c consume it. */
+
 VALUE
 rb_fix2str(VALUE x, int base)
 {
@@ -4066,9 +4084,34 @@ rb_fix2str(VALUE x, int base)
     else {
         u = val;
     }
-    do {
-        *--b = ruby_digitmap[(int)(u % base)];
-    } while (u /= base);
+    if (base == 10) {
+        /* Emit two digits per iteration from a precomputed table.  The
+         * compiler lowers `u % 100` and `u / 100` to a single multiply +
+         * shift, so each iteration costs roughly one multiply, one shift,
+         * and two stores.  About 2x fewer iterations than the classic
+         * per-digit loop for multi-digit inputs. */
+        while (u >= 100) {
+            unsigned long idx = (u % 100) * 2;
+            u /= 100;
+            b -= 2;
+            b[0] = ruby_decimal_digit_pairs[idx];
+            b[1] = ruby_decimal_digit_pairs[idx + 1];
+        }
+        if (u >= 10) {
+            unsigned long idx = u * 2;
+            b -= 2;
+            b[0] = ruby_decimal_digit_pairs[idx];
+            b[1] = ruby_decimal_digit_pairs[idx + 1];
+        }
+        else {
+            *--b = (char)('0' + u);
+        }
+    }
+    else {
+        do {
+            *--b = ruby_digitmap[(int)(u % base)];
+        } while (u /= base);
+    }
     if (neg) {
         *--b = '-';
     }
@@ -4332,7 +4375,7 @@ int_accurate_in_double(VALUE n)
     const size_t mant_size = roomof(DBL_MANT_DIG, CHAR_BIT);
     if (size < mant_size) return true;
     if (size > mant_size) return false;
-    if (nlz >= (CHAR_BIT * mant_size - DBL_MANT_DIG)) return true;
+    if ((size_t)nlz >= (CHAR_BIT * mant_size - DBL_MANT_DIG)) return true;
 #endif
     return false;
 }
@@ -5911,7 +5954,7 @@ int_downto(VALUE from, VALUE to)
             rb_yield(i);
             i = rb_funcall(i, '-', 1, INT2FIX(1));
         }
-        if (NIL_P(c)) rb_cmperr(i, to);
+        ensure_cmp(c, i, to);
     }
     return from;
 }

@@ -124,6 +124,14 @@ struct set_object {
 };
 
 static int
+mark_and_pin_key(st_data_t key, st_data_t data)
+{
+    rb_gc_mark((VALUE)key);
+
+    return ST_CONTINUE;
+}
+
+static int
 mark_key(st_data_t key, st_data_t data)
 {
     rb_gc_mark_movable((VALUE)key);
@@ -135,7 +143,14 @@ static void
 set_mark(void *ptr)
 {
     struct set_object *sobj = ptr;
-    if (sobj->table.entries) set_table_foreach(&sobj->table, mark_key, 0);
+    if (sobj->table.entries) {
+        if (sobj->table.type == &identhash) {
+            set_table_foreach(&sobj->table, mark_and_pin_key, 0);
+        }
+        else {
+            set_table_foreach(&sobj->table, mark_key, 0);
+        }
+    }
 }
 
 static void
@@ -362,11 +377,10 @@ set_compact_after_delete(VALUE set)
 }
 
 static int
-set_table_insert_wb(set_table *tab, VALUE set, VALUE key, VALUE *key_addr)
+set_table_insert_wb(set_table *tab, VALUE set, VALUE key)
 {
     if (tab->type != &identhash && rb_obj_class(key) == rb_cString && !RB_OBJ_FROZEN(key)) {
         key = rb_hash_key_str(key);
-        if (key_addr) *key_addr = key;
     }
     int ret = set_insert(tab, (st_data_t)key);
     if (ret == 0) RB_OBJ_WRITTEN(set, Qundef, key);
@@ -374,9 +388,9 @@ set_table_insert_wb(set_table *tab, VALUE set, VALUE key, VALUE *key_addr)
 }
 
 static int
-set_insert_wb(VALUE set, VALUE key, VALUE *key_addr)
+set_insert_wb(VALUE set, VALUE key)
 {
-    return set_table_insert_wb(RSET_TABLE(set), set, key, key_addr);
+    return set_table_insert_wb(RSET_TABLE(set), set, key);
 }
 
 static VALUE
@@ -413,7 +427,7 @@ set_s_create(int argc, VALUE *argv, VALUE klass)
     int i;
 
     for (i=0; i < argc; i++) {
-        set_table_insert_wb(table, set, argv[i], NULL);
+        set_table_insert_wb(table, set, argv[i]);
     }
 
     return set;
@@ -464,7 +478,7 @@ static VALUE
 set_initialize_without_block(RB_BLOCK_CALL_FUNC_ARGLIST(i, set))
 {
     VALUE element = i;
-    set_insert_wb(set, element, &element);
+    set_insert_wb(set, element);
     return element;
 }
 
@@ -472,27 +486,41 @@ static VALUE
 set_initialize_with_block(RB_BLOCK_CALL_FUNC_ARGLIST(i, set))
 {
     VALUE element = rb_yield(i);
-    set_insert_wb(set, element, &element);
+    set_insert_wb(set, element);
     return element;
 }
 
 /*
- *  call-seq:
- *    Set.new -> new_set
- *    Set.new(enum) -> new_set
- *    Set.new(enum) { |elem| ... } -> new_set
+ * call-seq:
+ *   Set.new(object = nil) -> new_set
+ *   Set.new(object = nil) {|element| ... } -> new_set
  *
- *  Creates a new set containing the elements of the given enumerable
- *  object.
+ * Returns a new \Set object based on the given +object+,
+ * which must be an Enumerable or +nil+.
  *
- *  If a block is given, the elements of enum are preprocessed by the
- *  given block.
+ * With argument +object+ given as +nil+,
+ * returns a new empty \Set object:
  *
- *    Set.new([1, 2])                       #=> Set[1, 2]
- *    Set.new([1, 2, 1])                    #=> Set[1, 2]
- *    Set.new([1, 'c', :s])                 #=> Set[1, "c", :s]
- *    Set.new(1..5)                         #=> Set[1, 2, 3, 4, 5]
- *    Set.new([1, 2, 3]) { |x| x * x }      #=> Set[1, 4, 9]
+ *   Set.new                          # => Set[]
+ *   Set.new { fail 'Cannot happen' } # => Set[]  # Block not called.
+ *
+ * With no block given and +object+ given as an Enumerable,
+ * populates the new set with the elements of +object+:
+ *
+ *   Set.new(%w[ a b c ])     # => Set["a", "b", "c"]
+ *   Set.new({foo: 0, bar: 1})     # => Set[[:foo, 0], [:bar, 1]]
+ *   Set.new(4..10)     # => Set[4, 5, 6, 7, 8, 9, 10]
+ *   Set.new(Dir.new('lib')).take(5)
+ *   # => [".", "..", "bundled_gems.rb", "bundler", "bundler.rb"]
+ *   Set.new(File.new('doc/NEWS/NEWS-4.0.0.md')).take(3)
+ *   # => ["# NEWS for Ruby 4.0.0\n", "\n", "This document is a list of user-visible feature changes\n"]
+ *
+ * With a block given and +object+ given as an Enumerable,
+ * calls the block with each element of +object+;
+ * adds the block's return value to the new set:
+ *
+ *   Set.new(4..10) {|i| i * 2 } # => Set[8, 10, 12, 14, 16, 18, 20]
+ *
  */
 static VALUE
 set_i_initialize(int argc, VALUE *argv, VALUE set)
@@ -513,7 +541,7 @@ set_i_initialize(int argc, VALUE *argv, VALUE set)
             for (i=0; i<RARRAY_LEN(other); i++) {
                 VALUE key = RARRAY_AREF(other, i);
                 if (block_given) key = rb_yield(key);
-                set_table_insert_wb(into, set, key, NULL);
+                set_table_insert_wb(into, set, key);
             }
         }
         else {
@@ -645,9 +673,6 @@ set_i_to_a(VALUE set)
  *
  *  Without a block, if +self+ is an instance of +Set+, returns +self+.
  *  Otherwise, calls <tt>Set.new(self, &block)</tt>.
- *
- *  A form with arguments is _deprecated_. It converts the set to another
- *  with <tt>klass.new(self, *args, &block)</tt>.
  */
 static VALUE
 set_i_to_set(VALUE set)
@@ -656,7 +681,7 @@ set_i_to_set(VALUE set)
         return set;
     }
 
-    return rb_funcall_passing_block(rb_cSet, id_new, 0, NULL);
+    return rb_funcall_passing_block(rb_cSet, id_new, 1, &set);
 }
 
 /*
@@ -693,7 +718,7 @@ set_i_add(VALUE set, VALUE item)
         }
     }
     else {
-        set_insert_wb(set, item, NULL);
+        set_insert_wb(set, item);
     }
     return set;
 }
@@ -720,7 +745,7 @@ set_i_add_p(VALUE set, VALUE item)
         return Qnil;
     }
     else {
-        return set_insert_wb(set, item, NULL) ? Qnil : set;
+        return set_insert_wb(set, item) ? Qnil : set;
     }
 }
 
@@ -1002,7 +1027,7 @@ set_intersection_i(st_data_t key, st_data_t tmp)
 {
     struct set_intersection_data *data = (struct set_intersection_data *)tmp;
     if (set_table_lookup(data->other, key)) {
-        set_table_insert_wb(data->into, data->set, key, NULL);
+        set_table_insert_wb(data->into, data->set, key);
     }
 
     return ST_CONTINUE;
@@ -1098,7 +1123,7 @@ static int
 set_merge_i(st_data_t key, st_data_t data)
 {
     struct set_merge_args *args = (struct set_merge_args *)data;
-    set_table_insert_wb(args->into, args->set, key, NULL);
+    set_table_insert_wb(args->into, args->set, key);
     return ST_CONTINUE;
 }
 
@@ -1106,7 +1131,7 @@ static VALUE
 set_merge_block(RB_BLOCK_CALL_FUNC_ARGLIST(key, set))
 {
     VALUE element = key;
-    set_insert_wb(set, element, &element);
+    set_insert_wb(set, element);
     return element;
 }
 
@@ -1124,7 +1149,7 @@ set_merge_enum_into(VALUE set, VALUE arg)
         long i;
         set_table *into = RSET_TABLE(set);
         for (i=0; i<RARRAY_LEN(arg); i++) {
-            set_table_insert_wb(into, set, RARRAY_AREF(arg, i), NULL);
+            set_table_insert_wb(into, set, RARRAY_AREF(arg, i));
         }
     }
     else {
@@ -1250,7 +1275,7 @@ set_xor_i(st_data_t key, st_data_t data)
     VALUE element = (VALUE)key;
     VALUE set = (VALUE)data;
     set_table *table = RSET_TABLE(set);
-    if (set_table_insert_wb(table, set, element, &element)) {
+    if (set_table_insert_wb(table, set, element)) {
         set_table_delete(table, &element);
     }
     return ST_CONTINUE;
@@ -1386,7 +1411,7 @@ set_i_each(VALUE set)
 static int
 set_collect_i(st_data_t key, st_data_t data)
 {
-    set_insert_wb((VALUE)data, rb_yield((VALUE)key), NULL);
+    set_insert_wb((VALUE)data, rb_yield((VALUE)key));
     return ST_CONTINUE;
 }
 

@@ -833,6 +833,7 @@ class ERB
     compiler = make_compiler(trim_mode)
     set_eoutvar(compiler, eoutvar)
     @src, @encoding, @frozen_string = *compiler.compile(str)
+    @src.freeze
     @filename = nil
     @lineno = 0
     @_init = self.class.singleton_class
@@ -1086,6 +1087,9 @@ class ERB
   # ```
   #
   def def_method(mod, methodname, fname='(ERB)')
+    unless @_init.equal?(self.class.singleton_class)
+      raise ArgumentError, "not initialized"
+    end
     src = self.src.sub(/^(?!#|$)/) {"def #{methodname}\n"} << "\nend\n"
     mod.module_eval do
       eval(src, binding, fname, -1)

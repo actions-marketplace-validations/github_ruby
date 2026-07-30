@@ -50,7 +50,7 @@ consensus on ruby-core/ruby-dev.
 
 * *No maintainer*
 
-#### lib/pathname.rb
+#### pathname_builtin.rb, lib/pathname.rb
 
 * Tanaka Akira ([akr])
 
@@ -64,6 +64,10 @@ consensus on ruby-core/ruby-dev.
 * Martin J. Dürst ([duerst])
 
 ### Standard Library(Extensions) Maintainers
+
+#### set.c
+
+* Akinori MUSHA ([knu])
 
 #### ext/continuation
 
@@ -84,6 +88,10 @@ consensus on ruby-core/ruby-dev.
 #### ext/objspace
 
 * *No maintainer*
+
+#### ext/pathname
+
+* Tanaka Akira ([akr])
 
 #### ext/pty
 
@@ -553,6 +561,7 @@ It may needs to make consensus on ruby-core/ruby-dev before making major changes
 
 #### benchmark
 
+* Benoit Daloze ([eregon])
 * https://github.com/ruby/benchmark
 * https://rubygems.org/gems/benchmark
 
@@ -616,6 +625,12 @@ It may needs to make consensus on ruby-core/ruby-dev before making major changes
 * https://github.com/ruby/tsort
 * https://rubygems.org/gems/tsort
 
+#### win32-registry
+
+* Nakamura Usaku ([unak])
+* https://github.com/ruby/win32-registry
+* https://rubygems.org/gems/win32-registry
+
 ## Platform Maintainers
 
 ### mswin64 (Microsoft Windows)
@@ -666,6 +681,7 @@ It may needs to make consensus on ruby-core/ruby-dev before making major changes
 [earlopain]: https://github.com/earlopain
 [eban]: https://github.com/eban
 [eileencodes]: https://github.com/eileencodes
+[eregon]: https://github.com/eregon
 [hasumikin]: https://github.com/hasumikin
 [hsbt]: https://github.com/hsbt
 [ima1zumi]: https://github.com/ima1zumi

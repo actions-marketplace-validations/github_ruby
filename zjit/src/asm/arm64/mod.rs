@@ -321,6 +321,12 @@ pub fn brk(cb: &mut CodeBlock, imm16: A64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// UDF - permanently undefined instruction
+pub fn udf(cb: &mut CodeBlock, imm16: u16) {
+    let bytes: [u8; 4] = Udf::udf(imm16).into();
+    cb.write_bytes(&bytes);
+}
+
 /// CMP - compare rn and rm, update flags
 pub fn cmp(cb: &mut CodeBlock, rn: A64Opnd, rm: A64Opnd) {
     let bytes: [u8; 4] = match (rn, rm) {
@@ -1447,7 +1453,7 @@ mod tests {
             cbz(cb, X0, offset);
             cbz(cb, W0, offset);
         });
-        assert_disasm_snapshot!(cb.disasm(), @r"
+        assert_disasm_snapshot!(cb.disasm(), @"
         0x0: cbz x0, #0xfffffffffffffffc
         0x4: cbz w0, #0
         ");
@@ -1461,7 +1467,7 @@ mod tests {
             cbnz(cb, X20, offset);
             cbnz(cb, W20, offset);
         });
-        assert_disasm_snapshot!(cb.disasm(), @r"
+        assert_disasm_snapshot!(cb.disasm(), @"
         0x0: cbnz x20, #8
         0x4: cbnz w20, #0xc
         ");
@@ -1614,7 +1620,7 @@ mod tests {
             ldurh(cb, W10, A64Opnd::new_mem(64, X1, 0));
             ldurh(cb, W10, A64Opnd::new_mem(64, X1, 123));
         });
-        assert_disasm_snapshot!(cb.disasm(), @r"
+        assert_disasm_snapshot!(cb.disasm(), @"
         0x0: ldurh w10, [x1]
         0x4: ldurh w10, [x1, #0x7b]
         ");

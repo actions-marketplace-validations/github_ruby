@@ -62,6 +62,7 @@ struct StringIO {
     int count;
 };
 
+static struct StringIO *get_strio_for_read(VALUE self);
 static VALUE strio_init(int, VALUE *, struct StringIO *, VALUE);
 static VALUE strio_unget_bytes(struct StringIO *, const char *, long);
 static long strio_write(VALUE self, VALUE str);
@@ -126,8 +127,14 @@ static const rb_data_type_t strio_data_type = {
 static struct StringIO*
 get_strio(VALUE self)
 {
-    struct StringIO *ptr = check_strio(rb_io_taint_check(self));
+    rb_check_frozen(self);
+    return get_strio_for_read(self);
+}
 
+static struct StringIO*
+get_strio_for_read(VALUE self)
+{
+    struct StringIO *ptr = check_strio(self);
     if (!ptr) {
 	rb_raise(rb_eIOError, "uninitialized stream");
     }
@@ -154,7 +161,21 @@ strio_substr(struct StringIO *ptr, long pos, long len, rb_encoding *enc)
     return enc_subseq(str, pos, len, enc);
 }
 
+static VALUE
+strio_readbuf(struct StringIO *ptr, VALUE str)
+{
+    if (!NIL_P(str)) {
+	StringValue(str);
+	rb_str_modify(str);
+	if (str == ptr->string) {
+	    rb_raise(rb_eArgError, "cannot read into the underlying string");
+	}
+    }
+    return str;
+}
+
 #define StringIO(obj) get_strio(obj)
+#define StringIOForRead(obj) get_strio_for_read(obj)
 
 #define STRIO_READABLE FL_USER4
 #define STRIO_WRITABLE FL_USER5
@@ -182,7 +203,7 @@ static VALUE sym_exception;
 static struct StringIO*
 readable(VALUE strio)
 {
-    struct StringIO *ptr = StringIO(strio);
+    struct StringIO *ptr = StringIOForRead(strio);
     if (!READABLE(strio)) {
 	rb_raise(rb_eIOError, "not opened for reading");
     }
@@ -387,7 +408,8 @@ strio_init(int argc, VALUE *argv, struct StringIO *ptr, VALUE self)
 static VALUE
 strio_finalize(VALUE self)
 {
-    struct StringIO *ptr = StringIO(self);
+    struct StringIO *ptr = check_strio(self);
+    if (!ptr) return Qnil;
     RB_OBJ_WRITE(self, &ptr->string, Qnil);
     ptr->flags &= ~FMODE_READWRITE;
     return self;
@@ -439,7 +461,7 @@ strio_s_new(int argc, VALUE *argv, VALUE klass)
 static VALUE
 strio_false(VALUE self)
 {
-    StringIO(self);
+    StringIOForRead(self);
     return Qfalse;
 }
 
@@ -449,7 +471,7 @@ strio_false(VALUE self)
 static VALUE
 strio_nil(VALUE self)
 {
-    StringIO(self);
+    StringIOForRead(self);
     return Qnil;
 }
 
@@ -459,7 +481,7 @@ strio_nil(VALUE self)
 static VALUE
 strio_self(VALUE self)
 {
-    StringIO(self);
+    StringIOForRead(self);
     return self;
 }
 
@@ -469,7 +491,7 @@ strio_self(VALUE self)
 static VALUE
 strio_0(VALUE self)
 {
-    StringIO(self);
+    StringIOForRead(self);
     return INT2FIX(0);
 }
 
@@ -479,7 +501,7 @@ strio_0(VALUE self)
 static VALUE
 strio_first(VALUE self, VALUE arg)
 {
-    StringIO(self);
+    StringIOForRead(self);
     return arg;
 }
 
@@ -489,7 +511,7 @@ strio_first(VALUE self, VALUE arg)
 static VALUE
 strio_unimpl(int argc, VALUE *argv, VALUE self)
 {
-    StringIO(self);
+    StringIOForRead(self);
     rb_notimplement();
 
     UNREACHABLE;
@@ -517,7 +539,7 @@ strio_unimpl(int argc, VALUE *argv, VALUE self)
 static VALUE
 strio_get_string(VALUE self)
 {
-    return StringIO(self)->string;
+    return StringIOForRead(self)->string;
 }
 
 /*
@@ -650,7 +672,7 @@ strio_close_write(VALUE self)
 static VALUE
 strio_closed(VALUE self)
 {
-    StringIO(self);
+    StringIOForRead(self);
     if (!CLOSED(self)) return Qfalse;
     return Qtrue;
 }
@@ -671,7 +693,7 @@ strio_closed(VALUE self)
 static VALUE
 strio_closed_read(VALUE self)
 {
-    StringIO(self);
+    StringIOForRead(self);
     if (READABLE(self)) return Qfalse;
     return Qtrue;
 }
@@ -692,7 +714,7 @@ strio_closed_read(VALUE self)
 static VALUE
 strio_closed_write(VALUE self)
 {
-    StringIO(self);
+    StringIOForRead(self);
     if (WRITABLE(self)) return Qfalse;
     return Qtrue;
 }
@@ -738,7 +760,7 @@ strio_copy(VALUE copy, VALUE orig)
 
     orig = rb_convert_type(orig, T_DATA, "StringIO", "to_strio");
     if (copy == orig) return copy;
-    ptr = StringIO(orig);
+    ptr = StringIOForRead(orig);
     old_ptr = check_strio(copy);
     if (old_ptr) {
 	old_string = old_ptr->string;
@@ -762,7 +784,7 @@ strio_copy(VALUE copy, VALUE orig)
 static VALUE
 strio_get_lineno(VALUE self)
 {
-    return LONG2NUM(StringIO(self)->lineno);
+    return LONG2NUM(StringIOForRead(self)->lineno);
 }
 
 /*
@@ -850,7 +872,7 @@ strio_reopen(int argc, VALUE *argv, VALUE self)
 static VALUE
 strio_get_pos(VALUE self)
 {
-    return LONG2NUM(StringIO(self)->pos);
+    return LONG2NUM(StringIOForRead(self)->pos);
 }
 
 /*
@@ -942,7 +964,7 @@ strio_seek(int argc, VALUE *argv, VALUE self)
 static VALUE
 strio_get_sync(VALUE self)
 {
-    StringIO(self);
+    StringIOForRead(self);
     return Qtrue;
 }
 
@@ -1675,11 +1697,7 @@ strio_read(int argc, VALUE *argv, VALUE self)
 
     switch (argc) {
       case 2:
-	str = argv[1];
-	if (!NIL_P(str)) {
-	    StringValue(str);
-	    rb_str_modify(str);
-	}
+	str = strio_readbuf(ptr, argv[1]);
 	/* fall through */
       case 1:
 	if (!NIL_P(argv[0])) {
@@ -1744,6 +1762,8 @@ static VALUE
 strio_pread(int argc, VALUE *argv, VALUE self)
 {
     VALUE rb_len, rb_offset, rb_buf;
+    struct StringIO *ptr = readable(self);
+
     rb_scan_args(argc, argv, "21", &rb_len, &rb_offset, &rb_buf);
     long len = NUM2LONG(rb_len);
     long offset = NUM2LONG(rb_offset);
@@ -1752,18 +1772,18 @@ strio_pread(int argc, VALUE *argv, VALUE self)
 	rb_raise(rb_eArgError, "negative string size (or size too big): %" PRIsVALUE, rb_len);
     }
 
+    if (offset < 0) {
+	rb_syserr_fail_str(EINVAL, rb_sprintf("pread: Invalid offset argument: %" PRIsVALUE, rb_offset));
+    }
+
+    rb_buf = strio_readbuf(ptr, rb_buf);
+
     if (len == 0) {
 	if (NIL_P(rb_buf)) {
 	    return rb_str_new("", 0);
 	}
 	return rb_buf;
     }
-
-    if (offset < 0) {
-	rb_syserr_fail_str(EINVAL, rb_sprintf("pread: Invalid offset argument: %" PRIsVALUE, rb_offset));
-    }
-
-    struct StringIO *ptr = readable(self);
 
     if (outside_p(ptr, offset)) {
 	rb_eof_error();
@@ -1863,7 +1883,7 @@ strio_syswrite_nonblock(int argc, VALUE *argv, VALUE self)
 static VALUE
 strio_size(VALUE self)
 {
-    VALUE string = StringIO(self)->string;
+    VALUE string = StringIOForRead(self)->string;
     if (NIL_P(string)) {
 	return INT2FIX(0);
     }
@@ -1915,7 +1935,7 @@ strio_truncate(VALUE self, VALUE len)
 static VALUE
 strio_external_encoding(VALUE self)
 {
-    struct StringIO *ptr = StringIO(self);
+    struct StringIO *ptr = StringIOForRead(self);
     return rb_enc_from_encoding(get_enc(ptr));
 }
 

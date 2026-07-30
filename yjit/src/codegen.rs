@@ -234,20 +234,36 @@ impl<'a> JITState<'a> {
         result
     }
 
-    /// Return true if the current ISEQ could escape an environment.
+    /// Return true if the JIT code can use [`Self::assume_no_ep_escape`]
+    /// and will run with an on-stack (`!VM_ENV_ESCAPED_P`) environment.
     ///
-    /// As of vm_push_frame(), EP is always equal to BP. However, after pushing
-    /// a frame, some ISEQ setups call vm_bind_update_env(), which redirects EP.
-    /// Also, some method calls escape the environment to the heap.
-    fn escapes_ep(&self) -> bool {
+    /// ## Reasoning about ISEQs that are not currently running
+    ///
+    /// As of vm_push_frame() and its JIT code equivalent, EP is always equal to BP (the
+    /// environment is on-stack and has not escaped). We can usually assume this is the starting
+    /// condition upon entry into JIT code. However, after pushing a frame and before entry into
+    /// JIT code, some ISEQ setups call vm_bind_update_env(), which redirects EP.
+    ///
+    /// ## After making the assumption
+    ///
+    /// After JIT code entry, many ruby operations can have the environment escape to heap. These
+    /// are handled by [`crate::invariants`].
+    ///
+    /// Exceptional entry through jit_exec_exception() is an extreme case of the environment state
+    /// changing between vm_push_frame() and entry into JIT code. The frame could have been pushed
+    /// before YJIT is enabled. The exception entry point refuses entry with an escaped environment.
+    fn can_assume_on_stack_env(&self) -> bool {
         match unsafe { get_iseq_body_type(self.iseq) } {
             // <main> frame is always associated to TOPLEVEL_BINDING.
             ISEQ_TYPE_MAIN |
             // Kernel#eval uses a heap EP when a Binding argument is not nil.
-            ISEQ_TYPE_EVAL => true,
-            // If this ISEQ has previously escaped EP, give up the optimization.
-            _ if iseq_escapes_ep(self.iseq) => true,
-            _ => false,
+            ISEQ_TYPE_EVAL => false,
+            // Check the running environment if compiling for it
+            _ if unsafe { self.iseq == get_cfp_iseq(self.get_cfp()) && cfp_env_has_escaped(self.get_cfp()) } => false,
+            // If we've seen this ISEQ run with an escaped environment, give up the optimization
+            // to avoid excessive invalidations (even though it may be fine for soundness).
+            _ if seen_escaped_env(self.iseq) => false,
+            _ => true,
         }
     }
 
@@ -376,8 +392,8 @@ impl<'a> JITState<'a> {
         if jit_ensure_block_entry_exit(self, asm).is_none() {
             return false; // out of space, give up
         }
-        if self.escapes_ep() {
-            return false; // EP has been escaped in this ISEQ. disable the optimization to avoid an invalidation loop.
+        if !self.can_assume_on_stack_env() {
+            return false; // Unsound or unprofitable to make the assumption
         }
         self.no_ep_escape = true;
         true
@@ -2425,20 +2441,81 @@ fn gen_get_ep(asm: &mut Assembler, level: u32) -> Opnd {
     ep_opnd
 }
 
-// Gets the EP of the ISeq of the containing method, or "local level".
-// Equivalent of GET_LEP() macro.
+/// Get the EP of the ISeq of the containing method, or "local level EP".
+/// Equivalent to `GET_LEP()` with a constraint:
+/// `ISEQ_TYPE_METHOD == iseq_under_compilation->body->local_iseq->body->type`.
+/// No bad memory access happens when this condition is not met, just that the
+/// EP returned may not be `VM_ENV_FLAG_LOCAL`. Practically, ISeqs that don't
+/// meet this condition, such as `ISEQ_TYPE_TOP`, also don't need to use this operation.
 fn gen_get_lep(jit: &JITState, asm: &mut Assembler) -> Opnd {
-    // Equivalent of get_lvar_level() in compile.c
-    fn get_lvar_level(iseq: IseqPtr) -> u32 {
-        if iseq == unsafe { rb_get_iseq_body_local_iseq(iseq) } {
-            0
-        } else {
-            1 + get_lvar_level(unsafe { rb_get_iseq_body_parent_iseq(iseq) })
-        }
+    // GET_LEP() chases the parent environment pointer to reach the local environment. Inside
+    // a descendant of ISEQ_TYPE_METHOD, it chases the same number of times as chasing
+    // the parent iseq pointer to reach the local iseq. See get_lvar_level() in compile.c
+    let mut iseq = jit.get_iseq();
+    let local_iseq = unsafe { rb_get_iseq_body_local_iseq(iseq) };
+    let mut level = 0;
+    while iseq != local_iseq {
+        iseq = unsafe { rb_get_iseq_body_parent_iseq(iseq) };
+        level += 1;
     }
-
-    let level = get_lvar_level(jit.get_iseq());
+    asm_comment!(asm, "get_lep(level: {level})");
     gen_get_ep(asm, level)
+}
+
+/// Load the value in the ME_CREF slot of the EP that contains the running CME.
+/// Returns the slot value directly, which is only useful for guarding that the
+/// CME has not changed. Unlike rb_vm_frame_method_entry(), we never dereference
+/// `ep[VM_ENV_DATA_INDEX_ME_CREF]` but rather rely on `ep[VM_ENV_DATA_INDEX_FLAGS]`
+/// to terminate the search, since we load the flags anyways for EP hopping.
+/// When `ep[VM_ENV_DATA_INDEX_ME_CREF]` is not a CME, it can't match the expected
+/// CME, and the guard fails.
+fn gen_get_running_cme_or_sentinal(jit: &JITState, asm: &mut Assembler) -> Opnd {
+    // When not in a block, the running CME is at `cfp->ep`.
+    if jit.iseq == unsafe { rb_get_iseq_body_local_iseq(jit.iseq) } {
+        asm_comment!(asm, "cfp->ep[VM_ENV_DATA_INDEX_ME_CREF]");
+        let lep_opnd = gen_get_ep(asm, 0);
+        Opnd::mem(
+            VALUE_BITS,
+            lep_opnd,
+            SIZEOF_VALUE_I32 * VM_ENV_DATA_INDEX_ME_CREF,
+        )
+    } else {
+        // Loop through EPs to find the one containing the CME.
+        // Stop when we find an EP with VM_FRAME_FLAG_BMETHOD (bmethod frame with CME)
+        // or VM_ENV_FLAG_LOCAL (local frame which is METHOD/CFUNC/IFUNC with CME).
+        //
+        // We cannot unroll to a static hop count like gen_get_lep() because bmethods
+        // defined inside methods may have a CME that lives at a EP cloers to the
+        // starting EP than at the local and final EP level. Each level of nesting can
+        // dynamically run with and without VM_FRAME_FLAG_BMETHOD set.
+        asm_comment!(asm, "search for running cme");
+        let loop_label = asm.new_label("cme_loop");
+        let done_label = asm.new_label("cme_done");
+
+        let ep_opnd = Opnd::mem(VALUE_BITS, CFP, RUBY_OFFSET_CFP_EP);
+        let ep_opnd = asm.load(ep_opnd);
+
+        asm.write_label(loop_label);
+        // Load flags from ep[VM_ENV_DATA_INDEX_FLAGS]
+        let flags = asm.load(Opnd::mem(VALUE_BITS, ep_opnd, SIZEOF_VALUE_I32 * (VM_ENV_DATA_INDEX_FLAGS as i32)));
+        // Check if VM_FRAME_FLAG_BMETHOD or VM_ENV_FLAG_LOCAL is set.
+        // If either is set, this EP contains the CME.
+        let check_flags = (VM_FRAME_FLAG_BMETHOD | VM_ENV_FLAG_LOCAL).as_usize();
+        asm.test(flags, check_flags.into());
+        asm.jnz(done_label);
+        // Get the previous EP from the current EP
+        // See GET_PREV_EP(ep) macro
+        // VALUE *prev_ep = ((VALUE *)((ep)[VM_ENV_DATA_INDEX_SPECVAL] & ~0x03))
+        let offs = SIZEOF_VALUE_I32 * VM_ENV_DATA_INDEX_SPECVAL;
+        let next_ep_opnd = asm.load(Opnd::mem(VALUE_BITS, ep_opnd, offs));
+        let next_ep_opnd = asm.and(next_ep_opnd, (!0x03_i64).into());
+        asm.load_into(ep_opnd, next_ep_opnd);
+        asm.jmp(loop_label);
+        asm.write_label(done_label);
+
+        // Load and return the CME from ep[VM_ENV_DATA_INDEX_ME_CREF]
+        asm.load(Opnd::mem(VALUE_BITS, ep_opnd, SIZEOF_VALUE_I32 * VM_ENV_DATA_INDEX_ME_CREF))
+    }
 }
 
 fn gen_getlocal_generic(
@@ -2448,7 +2525,7 @@ fn gen_getlocal_generic(
     level: u32,
 ) -> Option<CodegenStatus> {
     // Split the block if we need to invalidate this instruction when EP escapes
-    if level == 0 && !jit.escapes_ep() && !jit.at_compile_target() {
+    if level == 0 && jit.can_assume_on_stack_env() && !jit.at_compile_target() {
         return jit.defer_compilation(asm);
     }
 
@@ -2549,7 +2626,7 @@ fn gen_setlocal_generic(
     }
 
     // Split the block if we need to invalidate this instruction when EP escapes
-    if level == 0 && !jit.escapes_ep() && !jit.at_compile_target() {
+    if level == 0 && jit.can_assume_on_stack_env() && !jit.at_compile_target() {
         return jit.defer_compilation(asm);
     }
 
@@ -2687,7 +2764,7 @@ fn gen_newhash(
     Some(KeepCompiling)
 }
 
-fn gen_putstring(
+fn gen_dupstring(
     jit: &mut JITState,
     asm: &mut Assembler,
 ) -> Option<CodegenStatus> {
@@ -2707,7 +2784,7 @@ fn gen_putstring(
     Some(KeepCompiling)
 }
 
-fn gen_putchilledstring(
+fn gen_dupchilledstring(
     jit: &mut JITState,
     asm: &mut Assembler,
 ) -> Option<CodegenStatus> {
@@ -2873,7 +2950,7 @@ fn gen_get_ivar(
 
     // NOTE: This assumes T_OBJECT can't ever have the same shape_id as any other type.
     // too-complex shapes can't use index access, so we use rb_ivar_get for them too.
-    if !comptime_receiver.heap_object_p() || comptime_receiver.shape_too_complex() || megamorphic {
+    if !comptime_receiver.heap_object_p() || comptime_receiver.shape_complex() || megamorphic {
         // General case. Call rb_ivar_get().
         // VALUE rb_ivar_get(VALUE obj, ID id)
         asm_comment!(asm, "call rb_ivar_get()");
@@ -2898,7 +2975,7 @@ fn gen_get_ivar(
 
     let ivar_index = unsafe {
         let shape_id = comptime_receiver.shape_id_of();
-        let mut ivar_index: u16 = 0;
+        let mut ivar_index: attr_index_t = 0;
         if rb_shape_get_iv_index(shape_id, ivar_name, &mut ivar_index) {
             Some(ivar_index as usize)
         } else {
@@ -3091,10 +3168,10 @@ fn gen_set_ivar(
     }
 
     // Get the iv index
-    let shape_too_complex = comptime_receiver.shape_too_complex();
-    let ivar_index = if !comptime_receiver.special_const_p() && !shape_too_complex {
+    let shape_complex = comptime_receiver.shape_complex();
+    let ivar_index = if !comptime_receiver.special_const_p() && !shape_complex {
         let shape_id = comptime_receiver.shape_id_of();
-        let mut ivar_index: u16 = 0;
+        let mut ivar_index: attr_index_t = 0;
         if unsafe { rb_shape_get_iv_index(shape_id, ivar_name, &mut ivar_index) } {
             Some(ivar_index as usize)
         } else {
@@ -3105,23 +3182,23 @@ fn gen_set_ivar(
     };
 
     // The current shape doesn't contain this iv, we need to transition to another shape.
-    let mut new_shape_too_complex = false;
-    let new_shape = if !shape_too_complex && receiver_t_object && ivar_index.is_none() {
+    let mut new_shape_complex = false;
+    let new_shape = if !shape_complex && receiver_t_object && ivar_index.is_none() {
         let current_shape_id = comptime_receiver.shape_id_of();
         // We don't need to check about imemo_fields here because we're definitely looking at a T_OBJECT.
         let klass = unsafe { rb_obj_class(comptime_receiver) };
-        let next_shape_id = unsafe { rb_shape_transition_add_ivar_no_warnings(klass, current_shape_id, ivar_name) };
+        let next_shape_id = unsafe { rb_shape_transition_add_ivar_no_warnings(current_shape_id, ivar_name, klass) };
 
         // If the VM ran out of shapes, or this class generated too many leaf,
-        // it may be de-optimized into OBJ_TOO_COMPLEX_SHAPE (hash-table).
-        new_shape_too_complex = unsafe { rb_jit_shape_too_complex_p(next_shape_id) };
-        if new_shape_too_complex {
+        // it may be de-optimized into OBJ_COMPLEX_SHAPE (hash-table).
+        new_shape_complex = unsafe { rb_jit_shape_complex_p(next_shape_id) };
+        if new_shape_complex {
             Some((next_shape_id, None, 0_usize))
         } else {
             let current_capacity = unsafe { rb_yjit_shape_capacity(current_shape_id) };
             let next_capacity = unsafe { rb_yjit_shape_capacity(next_shape_id) };
 
-            // If the new shape has a different capacity, or is TOO_COMPLEX, we'll have to
+            // If the new shape has a different capacity, or is COMPLEX, we'll have to
             // reallocate it.
             let needs_extension = next_capacity != current_capacity;
 
@@ -3141,7 +3218,7 @@ fn gen_set_ivar(
 
     // If the receiver isn't a T_OBJECT, then just write out the IV write as a function call.
     // too-complex shapes can't use index access, so we use rb_ivar_get for them too.
-    if !receiver_t_object || shape_too_complex || new_shape_too_complex || megamorphic {
+    if !receiver_t_object || shape_complex || new_shape_complex || megamorphic {
         // The function could raise FrozenError.
         // Note that this modifies REG_SP, which is why we do it first
         jit_prepare_non_leaf_call(jit, asm);
@@ -3358,7 +3435,7 @@ fn gen_definedivar(
     // Specialize base on compile time values
     let comptime_receiver = jit.peek_at_self();
 
-    if comptime_receiver.special_const_p() || comptime_receiver.shape_too_complex() || asm.ctx.get_chain_depth() >= GET_IVAR_MAX_DEPTH {
+    if comptime_receiver.special_const_p() || comptime_receiver.shape_complex() || asm.ctx.get_chain_depth() >= GET_IVAR_MAX_DEPTH {
         // Fall back to calling rb_ivar_defined
 
         // Save the PC and SP because the callee may allocate
@@ -3384,7 +3461,7 @@ fn gen_definedivar(
 
     let shape_id = comptime_receiver.shape_id_of();
     let ivar_exists = unsafe {
-        let mut ivar_index: u16 = 0;
+        let mut ivar_index: attr_index_t = 0;
         rb_shape_get_iv_index(shape_id, ivar_name, &mut ivar_index)
     };
 
@@ -4574,21 +4651,8 @@ fn gen_opt_case_dispatch(
 
     // Check that all cases are fixnums to avoid having to register BOP assumptions on
     // all the types that case hashes support. This spends compile time to save memory.
-    fn case_hash_all_fixnum_p(hash: VALUE) -> bool {
-        let mut all_fixnum = true;
-        unsafe {
-            unsafe extern "C" fn per_case(key: st_data_t, _value: st_data_t, data: st_data_t) -> c_int {
-                (if VALUE(key as usize).fixnum_p() {
-                    ST_CONTINUE
-                } else {
-                    (data as *mut bool).write(false);
-                    ST_STOP
-                }) as c_int
-            }
-            rb_hash_stlike_foreach(hash, Some(per_case), (&mut all_fixnum) as *mut _ as st_data_t);
-        }
-
-        all_fixnum
+    fn case_hash_all_fixnum_p(cdhash: VALUE) -> bool {
+        unsafe { rb_yjit_cdhash_all_fixnum_p(cdhash) }
     }
 
     // If megamorphic, fallback to compiling branch instructions after opt_case_dispatch
@@ -4615,12 +4679,11 @@ fn gen_opt_case_dispatch(
 
         // Get the offset for the compile-time key
         let mut offset = 0;
-        unsafe { rb_hash_stlike_lookup(case_hash, comptime_key.0 as _, &mut offset) };
-        let jump_offset = if offset == 0 {
+        let jump_offset = if unsafe { rb_yjit_cdhash_lookup(case_hash, comptime_key.0 as _, &mut offset) } == 0 {
             // NOTE: If we hit the else branch with various values, it could negatively impact the performance.
             else_offset
         } else {
-            (offset as u32) >> 1 // FIX2LONG
+            offset as u32
         };
 
         // Jump to the offset of case or else
@@ -8910,9 +8973,9 @@ fn gen_struct_aref(
         handle_opt_send_shift_stack(asm, argc);
     }
 
-    // All structs from the same Struct class should have the same
+    // All structs from the same Struct class and shape_id should have the same
     // length. So if our comptime_recv is embedded all runtime
-    // structs of the same class should be as well, and the same is
+    // structs of the same class and shape_id should be as well, and the same is
     // true of the converse.
     let embedded = unsafe { FL_TEST_RAW(comptime_recv, VALUE(RSTRUCT_EMBED_LEN_MASK)) };
 
@@ -9832,6 +9895,15 @@ fn gen_invokesuper_specialized(
         return None;
     }
 
+    let ci = unsafe { get_call_data_ci(cd) };
+    let ci_flags = unsafe { vm_ci_flag(ci) };
+
+    // Bail on ZSUPER inside a block method. They always raise.
+    if ci_flags & VM_CALL_ZSUPER != 0 && VM_METHOD_TYPE_BMETHOD == unsafe { get_cme_def_type(me) } {
+        gen_counter_incr(jit, asm, Counter::invokesuper_bmethod_zsuper);
+        return None;
+    }
+
     // FIXME: We should track and invalidate this block when this cme is invalidated
     let current_defined_class = unsafe { (*me).defined_class };
     let mid = unsafe { get_def_original_id((*me).def) };
@@ -9847,14 +9919,8 @@ fn gen_invokesuper_specialized(
     let comptime_superclass =
         unsafe { rb_class_get_superclass(RCLASS_ORIGIN(current_defined_class)) };
 
-    let ci = unsafe { get_call_data_ci(cd) };
-    let argc: i32 = unsafe { vm_ci_argc(ci) }.try_into().unwrap();
-
-    let ci_flags = unsafe { vm_ci_flag(ci) };
-
     // Don't JIT calls that aren't simple
     // Note, not using VM_CALL_ARGS_SIMPLE because sometimes we pass a block.
-
     if ci_flags & VM_CALL_KWARG != 0 {
         gen_counter_incr(jit, asm, Counter::invokesuper_kwarg);
         return None;
@@ -9873,6 +9939,7 @@ fn gen_invokesuper_specialized(
     // cheaper calculations first, but since we specialize on the method entry
     // and so only have to do this once at compile time this is fine to always
     // check and side exit.
+    let argc: i32 = unsafe { vm_ci_argc(ci) }.try_into().unwrap();
     let comptime_recv = jit.peek_at_stack(&asm.ctx, argc as isize);
     if unsafe { rb_obj_is_kind_of(comptime_recv, current_defined_class) } == VALUE(0) {
         gen_counter_incr(jit, asm, Counter::invokesuper_defined_class_mismatch);
@@ -9900,16 +9967,8 @@ fn gen_invokesuper_specialized(
         return None;
     }
 
-    asm_comment!(asm, "guard known me");
-    let lep_opnd = gen_get_lep(jit, asm);
-    let ep_me_opnd = Opnd::mem(
-        64,
-        lep_opnd,
-        SIZEOF_VALUE_I32 * VM_ENV_DATA_INDEX_ME_CREF,
-    );
-
-    let me_as_value = VALUE(me as usize);
-    asm.cmp(ep_me_opnd, me_as_value.into());
+    let cme_opnd = gen_get_running_cme_or_sentinal(jit, asm);
+    asm.cmp(cme_opnd, VALUE::from(me).into());
     jit_chain_guard(
         JCC_JNE,
         jit,
@@ -10121,45 +10180,18 @@ fn gen_toregexp(
     let opt = jit.get_arg(0).as_i64();
     let cnt = jit.get_arg(1).as_usize();
 
-    // Save the PC and SP because this allocates an object and could
-    // raise an exception.
+    // Allocates objects and could raise an exception.
     jit_prepare_non_leaf_call(jit, asm);
 
     let values_ptr = asm.lea(asm.ctx.sp_opnd(-(cnt as i32)));
 
-    let ary = asm.ccall(
-        rb_ary_tmp_new_from_values as *const u8,
-        vec![
-            Opnd::Imm(0),
-            cnt.into(),
-            values_ptr,
-        ]
+    let regexp = asm.ccall(
+        rb_reg_new_from_values as _,
+        vec![cnt.into(), values_ptr, opt.into()],
     );
     asm.stack_pop(cnt); // Let ccall spill them
-
-    // Save the array so we can clear it later
-    asm.cpush(ary);
-    asm.cpush(ary); // Alignment
-
-    let val = asm.ccall(
-        rb_reg_new_ary as *const u8,
-        vec![
-            ary,
-            Opnd::Imm(opt),
-        ]
-    );
-
-    // The actual regex is in RAX now.  Pop the temp array from
-    // rb_ary_tmp_new_from_values into C arg regs so we can clear it
-    let ary = asm.cpop(); // Alignment
-    asm.cpop_into(ary);
-
-    // The value we want to push on the stack is in RAX right now
     let stack_ret = asm.stack_push(Type::UnknownHeap);
-    asm.mov(stack_ret, val);
-
-    // Clear the temp array.
-    asm.ccall(rb_ary_clear as *const u8, vec![ary]);
+    asm.mov(stack_ret, regexp);
 
     Some(KeepCompiling)
 }
@@ -10741,8 +10773,8 @@ fn get_gen_fn(opcode: VALUE) -> Option<InsnGenFn> {
         YARVINSN_concattoarray => Some(gen_concattoarray),
         YARVINSN_pushtoarray => Some(gen_pushtoarray),
         YARVINSN_newrange => Some(gen_newrange),
-        YARVINSN_putstring => Some(gen_putstring),
-        YARVINSN_putchilledstring => Some(gen_putchilledstring),
+        YARVINSN_dupstring => Some(gen_dupstring),
+        YARVINSN_dupchilledstring => Some(gen_dupchilledstring),
         YARVINSN_expandarray => Some(gen_expandarray),
         YARVINSN_defined => Some(gen_defined),
         YARVINSN_definedivar => Some(gen_definedivar),

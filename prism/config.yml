@@ -17,6 +17,8 @@ errors:
   - ARGUMENT_FORWARDING_UNBOUND
   - ARGUMENT_NO_FORWARDING_AMPERSAND
   - ARGUMENT_NO_FORWARDING_ELLIPSES
+  - ARGUMENT_NO_FORWARDING_ELLIPSES_LAMBDA
+  - ARGUMENT_NO_FORWARDING_ELLIPSES_BLOCK
   - ARGUMENT_NO_FORWARDING_STAR
   - ARGUMENT_NO_FORWARDING_STAR_STAR
   - ARGUMENT_SPLAT_AFTER_ASSOC_SPLAT
@@ -62,6 +64,7 @@ errors:
   - DEF_ENDLESS
   - DEF_ENDLESS_PARAMETERS
   - DEF_ENDLESS_SETTER
+  - DEF_ENDLESS_DO_BLOCK
   - DEF_NAME
   - DEF_PARAMS_TERM
   - DEF_PARAMS_TERM_PAREN
@@ -245,7 +248,9 @@ errors:
   - PATTERN_TERM_PAREN
   - PIPEPIPEEQ_MULTI_ASSIGN
   - REGEXP_ENCODING_OPTION_MISMATCH
+  - REGEXP_ESCAPED_NON_ASCII_IN_UTF8
   - REGEXP_INCOMPAT_CHAR_ENCODING
+  - REGEXP_INVALID_CHAR_PROPERTY
   - REGEXP_INVALID_UNICODE_RANGE
   - REGEXP_NON_ESCAPED_MBC
   - REGEXP_PARSE_ERROR
@@ -491,6 +496,8 @@ tokens:
     comment: "def"
   - name: KEYWORD_DEFINED
     comment: "defined?"
+  - name: KEYWORD_DO_BLOCK
+    comment: "do keyword for a block attached to a command"
   - name: KEYWORD_DO_LOOP
     comment: "do keyword for a predicate in a while, until, or for loop"
   - name: KEYWORD_END_UPCASE
@@ -807,8 +814,6 @@ nodes:
           - GlobalVariableReadNode
           - BackReferenceReadNode
           - NumberedReferenceReadNode
-          - on error: SymbolNode # alias $a b
-          - on error: MissingNode # alias $a 42
         comment: |
           Represents the old name of the global variable that can be used before aliasing.
 
@@ -849,8 +854,6 @@ nodes:
         kind:
           - SymbolNode
           - InterpolatedSymbolNode
-          - on error: GlobalVariableReadNode # alias a $b
-          - on error: MissingNode # alias a 42
         comment: |
           Represents the old name of the method that will be aliased.
 
@@ -1014,7 +1017,9 @@ nodes:
                       ^  ^
       - name: rest
         type: node?
-        kind: pattern expression
+        kind:
+          - ImplicitRestNode
+          - SplatNode
         comment: |
           Represents the rest element of the array pattern.
 
@@ -1046,19 +1051,19 @@ nodes:
       Represents an array pattern in pattern matching.
 
           foo in 1, 2
-          ^^^^^^^^^^^
+                 ^^^^
 
           foo in [1, 2]
-          ^^^^^^^^^^^^^
+                 ^^^^^^
 
           foo in *bar
-          ^^^^^^^^^^^
+                 ^^^^
 
           foo in Bar[]
-          ^^^^^^^^^^^^
+                 ^^^^^
 
           foo in Bar[1, 2, 3]
-          ^^^^^^^^^^^^^^^^^^^
+                 ^^^^^^^^^^^^
   - name: AssocNode
     fields:
       - name: key
@@ -1167,7 +1172,7 @@ nodes:
           Represents the else clause within the begin block.
 
               begin x; rescue y; else z; end
-                                 ^^^^^^
+                                 ^^^^^^^^^^^
       - name: ensure_clause
         type: node?
         kind: EnsureNode
@@ -1200,7 +1205,7 @@ nodes:
           The expression that is being passed as a block argument. This can be any [non-void expression](https://github.com/ruby/prism/blob/main/docs/parsing_rules.md#non-void-expression).
 
               foo(&args)
-                  ^^^^^
+                   ^^^^
       - name: operator_loc
         type: location
         comment: |
@@ -1212,7 +1217,7 @@ nodes:
       Represents a block argument using `&`.
 
           bar(&args)
-          ^^^^^^^^^^
+              ^^^^^
   - name: BlockLocalVariableNode
     flags: ParameterFlags
     fields:
@@ -1753,7 +1758,7 @@ nodes:
       Represents assigning to a local variable in pattern matching.
 
           foo => [bar => baz]
-                 ^^^^^^^^^^^^
+                  ^^^^^^^^^^
   - name: CaseMatchNode
     fields:
       - name: predicate
@@ -1763,7 +1768,7 @@ nodes:
           Represents the predicate of the case match. This can be either `nil` or any [non-void expressions](https://github.com/ruby/prism/blob/main/docs/parsing_rules.md#non-void-expression).
 
               case true; in false; end
-              ^^^^
+                   ^^^^
       - name: conditions
         type: node[]
         kind: InNode
@@ -1779,7 +1784,7 @@ nodes:
           Represents the else clause of the case match.
 
               case true; in false; else; end
-                                   ^^^^
+                                   ^^^^^^^^^
       - name: case_keyword_loc
         type: location
         comment: |
@@ -1826,7 +1831,7 @@ nodes:
           Represents the else clause of the case statement.
 
               case true; when false; else; end
-                                     ^^^^
+                                     ^^^^^^^^^
       - name: case_keyword_loc
         type: location
         comment: |
@@ -1864,7 +1869,6 @@ nodes:
         kind:
           - ConstantReadNode
           - ConstantPathNode
-          - on error: CallNode # class 0.X end
       - name: inheritance_operator_loc
         type: location?
         comment: |
@@ -1888,9 +1892,8 @@ nodes:
         comment: |
           Represents the body of the class.
 
-              class Foo
-                foo
-                ^^^
+              class Foo; bar; end
+                         ^^^
       - name: end_keyword_loc
         type: location
         comment: |
@@ -2419,6 +2422,15 @@ nodes:
           ^^^^^^
             bar
           end
+  - name: ErrorRecoveryNode
+    fields:
+      - name: unexpected
+        type: node?
+        kind: Node
+        comment: |
+          The unexpected node that was found in the tree, if there was one.
+    comment: |
+      Represents a node that is either missing or unexpected and results in a syntax error.
   - name: FalseNode
     comment: |
       Represents the use of the literal `false` keyword.
@@ -2461,9 +2473,7 @@ nodes:
                                ^^^^^^
       - name: right
         type: node
-        kind:
-          - SplatNode
-          - on error: MissingNode
+        kind: SplatNode
         comment: |
           Represents the second wildcard node in the pattern.
 
@@ -2546,9 +2556,6 @@ nodes:
           - CallTargetNode
           - IndexTargetNode
           - MultiTargetNode
-          - on error: BackReferenceReadNode # for $& in a end
-          - on error: NumberedReferenceReadNode # for $1 in a end
-          - on error: MissingNode # for in 1..10; end
         comment: |
           The index expression for `for` loops.
 
@@ -2622,6 +2629,14 @@ nodes:
           end
   - name: ForwardingSuperNode
     fields:
+      - name: keyword_loc
+        type: location
+        comment: |
+          super
+          ^^^^^
+
+          super { 123 }
+          ^^^^^
       - name: block
         type: node?
         kind: BlockNode
@@ -3302,10 +3317,6 @@ nodes:
           - EmbeddedStatementsNode
           - EmbeddedVariableNode
           - InterpolatedStringNode # `"a" "#{b}"`
-          - on error: XStringNode # `<<`FOO` "bar"
-          - on error: InterpolatedXStringNode
-          - on error: SymbolNode
-          - on error: InterpolatedSymbolNode
       - name: closing_loc
         type: location?
     newline: parts
@@ -3683,9 +3694,6 @@ nodes:
 
           /(?<foo>bar)/ =~ baz
           ^^^^^^^^^^^^^^^^^^^^
-  - name: MissingNode
-    comment: |
-      Represents a node that is missing from the source and results in a syntax error.
   - name: ModuleNode
     fields:
       - name: locals
@@ -3697,7 +3705,6 @@ nodes:
         kind:
           - ConstantReadNode
           - ConstantPathNode
-          - on error: MissingNode # module Parent module end
       - name: body
         type: node?
         kind:
@@ -3727,8 +3734,6 @@ nodes:
           - IndexTargetNode
           - MultiTargetNode
           - RequiredParameterNode # def m((a,b)); end
-          - on error: BackReferenceReadNode # a, (b, $&) = z
-          - on error: NumberedReferenceReadNode # a, (b, $1) = z
         comment: |
           Represents the targets expressions before a splat node.
 
@@ -3772,8 +3777,6 @@ nodes:
           - IndexTargetNode
           - MultiTargetNode
           - RequiredParameterNode # def m((*,b)); end
-          - on error: BackReferenceReadNode # a, (*, $&) = z
-          - on error: NumberedReferenceReadNode # a, (*, $1) = z
         comment: |
           Represents the targets expressions after a splat node.
 
@@ -3817,8 +3820,6 @@ nodes:
           - CallTargetNode
           - IndexTargetNode
           - MultiTargetNode
-          - on error: BackReferenceReadNode # $&, = z
-          - on error: NumberedReferenceReadNode # $1, = z
         comment: |
           Represents the targets expressions before a splat node.
 
@@ -3861,8 +3862,6 @@ nodes:
           - CallTargetNode
           - IndexTargetNode
           - MultiTargetNode
-          - on error: BackReferenceReadNode # *, $& = z
-          - on error: NumberedReferenceReadNode # *, $1 = z
         comment: |
           Represents the targets expressions after a splat node.
 
@@ -4060,14 +4059,6 @@ nodes:
         kind:
           - RequiredParameterNode
           - MultiTargetNode
-          # On parsing error of `f(**kwargs, ...)` or `f(**nil, ...)`, the keyword_rest value is moved here:
-          - on error: KeywordRestParameterNode
-          - on error: NoKeywordsParameterNode
-          # On parsing error of `f(..., ...)`, the first forwarding parameter is moved here:
-          - on error: ForwardingParameterNode
-          # On parsing error of `f(&nil, &foo)`/`f(&foo, &nil)`, the first forwarding parameter is moved here:
-          - on error: BlockParameterNode
-          - on error: NoBlockParameterNode
       - name: keywords
         type: node[]
         kind:
@@ -4154,7 +4145,6 @@ nodes:
           - BackReferenceReadNode # foo in ^$&
           - NumberedReferenceReadNode # foo in ^$1
           - ItLocalVariableReadNode # proc { 1 in ^it }
-          - on error: MissingNode # foo in ^Bar
         comment: |
           The variable used in the pinned expression
 
@@ -4237,7 +4227,7 @@ nodes:
 
               1...foo
                   ^^^
-          If neither right-hand or left-hand side was included, this will be a MissingNode.
+          If neither right-hand or left-hand side was included, this will be an ErrorRecoveryNode.
       - name: operator_loc
         type: location
         comment: |
@@ -4352,9 +4342,6 @@ nodes:
           - ConstantPathTargetNode
           - CallTargetNode
           - IndexTargetNode
-          - on error: BackReferenceReadNode # => begin; rescue => $&; end
-          - on error: NumberedReferenceReadNode # => begin; rescue => $1; end
-          - on error: MissingNode # begin; rescue =>; end
       - name: then_keyword_loc
         type: location?
       - name: statements
@@ -4635,7 +4622,7 @@ nodes:
           The else clause of the unless expression, if present.
 
               unless cond then bar else baz end
-                                   ^^^^^^^^
+                                   ^^^^^^^^^^^^
       - name: end_keyword_loc
         type: location?
         comment: |

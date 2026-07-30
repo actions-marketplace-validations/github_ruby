@@ -110,6 +110,26 @@ AS_IF([test "$HAVE_BASERUBY" = no], [
 ])
 AC_SUBST(BASERUBY)
 AC_SUBST(HAVE_BASERUBY)
+AS_IF([test "$cross_compiling" = yes],
+    [X_BUILD_EXEEXT=`$BASERUBY -rrbconfig -e ['puts RbConfig::CONFIG["EXEEXT"]']`],
+    [X_BUILD_EXEEXT='$(EXEEXT)']
+)
+AC_SUBST(X_BUILD_EXEEXT)
+
+AC_ARG_WITH(dump-ast,
+	AS_HELP_STRING([--with-dump-ast=DUMP_AST], [use DUMP_AST as dump_ast; for cross-compiling with a host-built dump_ast]),
+	[DUMP_AST=$withval DUMP_AST_TARGET='$(empty)'],
+	[AS_IF([test "$cross_compiling" = yes], [
+	    DUMP_AST='build-tool/dump_ast$(BUILD_EXEEXT)'
+	], [
+	    DUMP_AST='./dump_ast$(BUILD_EXEEXT)'
+	])
+	DUMP_AST_TARGET='$(DUMP_AST)'])
+dnl Without baseruby, .rbinc files cannot be regenerated, so clear the
+dnl dependency on dump_ast to avoid rebuilding pre-generated .rbinc files.
+AS_IF([test "$HAVE_BASERUBY" = no], [DUMP_AST_TARGET='$(empty)'])
+AC_SUBST(X_DUMP_AST, "${DUMP_AST}")
+AC_SUBST(X_DUMP_AST_TARGET, "${DUMP_AST_TARGET}")
 
 : ${GIT=git}
 HAVE_GIT=yes
@@ -268,6 +288,11 @@ AS_CASE(["/${rb_CC} "],
     RUBY_CHECK_PROG_FOR_CC([OBJDUMP], [clang], [${llvm_prefix}objdump])
     RUBY_CHECK_PROG_FOR_CC([RANLIB],  [clang], [${llvm_prefix}ranlib])
     RUBY_CHECK_PROG_FOR_CC([STRIP],   [clang], [${llvm_prefix}strip])
+
+    # These -Wno-* flags silence clang-specific diagnostics that don't exist
+    # in GCC.  GCC silently accepts unknown -Wno-* flags but later emits noisy
+    # "unrecognized command-line option" notes whenever another warning fires.
+    clang_warnflags="-Wno-constant-logical-operand -Wno-parentheses-equality -Wno-self-assign"
 ])
 AS_UNSET(rb_CC)
 AS_UNSET(rb_dummy)
@@ -715,7 +740,7 @@ AS_IF([test "$fdeclspec" = yes], [
     RUBY_APPEND_OPTIONS(cflags, -fdeclspec)
     RUBY_APPEND_OPTIONS(orig_cflags, -fdeclspec)
 ])
-RUBY_TRY_CXXFLAGS(-fdeclspec, [fdeclspec=yes], [fdeclspec=no])
+RUBY_TRY_CXXFLAGS(-fdeclspec, [fdeclspec=yes], [fdeclspec=no], [@%:@include <cstdio>])
 AS_IF([test "$fdeclspec" = yes], [
     RUBY_APPEND_OPTIONS(CXXFLAGS, -fdeclspec)
 ])
@@ -767,13 +792,10 @@ AS_CASE(["$GCC:${warnflags+set}:${extra_warnflags:+set}:"],
 		 -Wimplicit-fallthrough=0 \
 		 -Wmissing-noreturn \
 		 -Wno-cast-function-type \
-		 -Wno-constant-logical-operand \
 		 -Wno-long-long \
 		 -Wno-missing-field-initializers \
 		 -Wno-overlength-strings \
 		 -Wno-packed-bitfield-compat \
-		 -Wno-parentheses-equality \
-		 -Wno-self-assign \
 		 -Wno-tautological-compare \
 		 -Wno-unused-parameter \
 		 -Wno-unused-value \
@@ -781,6 +803,7 @@ AS_CASE(["$GCC:${warnflags+set}:${extra_warnflags:+set}:"],
 		 -Wsuggest-attribute=noreturn \
 		 -Wunused-variable \
 		 -diag-disable=175,188,1684,2259,2312 \
+		 $clang_warnflags \
 		 $extra_warnflags \
 		 ; do
 	AS_IF([test "$particular_werror_flags" != yes], [
@@ -2491,9 +2514,7 @@ AC_CACHE_CHECK(for negative time_t for gmtime(3), rb_cv_negative_time_t,
 #include <time.h>
 
 void
-check(tm, y, m, d, h, s)
-    struct tm *tm;
-    int y, m, d, h, s;
+check(struct tm *tm, int y, int m, int d, int h, int s)
 {
     if (!tm ||
 	tm->tm_year != y ||
@@ -2577,8 +2598,7 @@ AS_IF([test "$ac_cv_func_sigprocmask" = yes && test "$ac_cv_func_sigaction" = ye
 #include <signal.h>
 
 void
-sig_handler(dummy)
-     int dummy;
+sig_handler(int dummy)
 {
 }
 
@@ -3521,7 +3541,7 @@ AS_IF([test x"$cross_compiling" = xyes], [
     # darwin target requires miniruby for linking ext bundles
     PREP="$PREP"' miniruby$(EXEEXT)'
   ])
-  RUNRUBY_COMMAND='$(MINIRUBY) -I`cd $(srcdir)/lib; pwd`'
+  RUNRUBY_COMMAND='$(MINIRUBY) -I`$(CHDIR) $(srcdir)/lib; pwd`'
   RUNRUBY='$(RUNRUBY_COMMAND)'
   XRUBY='$(MINIRUBY)'
   TEST_RUNNABLE=no
@@ -3563,7 +3583,8 @@ AS_CASE(["$target_os"],
 
 AC_ARG_ENABLE(multiarch,
 	      AS_HELP_STRING([--enable-multiarch], [enable multiarch compatible directories]),
-	      [multiarch=], [unset multiarch])
+	      [AS_CASE([$enableval], [no], [unset multiarch], [multiarch=])],
+	      [unset multiarch])
 AS_IF([test ${multiarch+set}], [
    AC_DEFINE(ENABLE_MULTIARCH)
 ])
@@ -4679,6 +4700,9 @@ m4_foreach(parser, [available_parsers],
     parser[,][AC_DEFINE_UNQUOTED(RB_DEFAULT_PARSER, RB_DEFAULT_PARSER_[]AS_TR_CPP(parser)),])
     [AC_MSG_ERROR([Unknown parser: $with_parser])]
 )
+
+# Use the ruby allocator for prism. See prism/defines.h
+RUBY_APPEND_OPTIONS(XCFLAGS, -DPRISM_XALLOCATOR)
 
 arch_hdrdir="${EXTOUT}/include/${arch}/ruby"
 AS_MKDIR_P("${arch_hdrdir}")

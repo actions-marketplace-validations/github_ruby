@@ -248,6 +248,7 @@ pub const DEFAULT_COUNTERS: &'static [Counter] = &[
     Counter::compiled_blockid_count,
     Counter::compiled_block_count,
     Counter::deleted_defer_block_count,
+    Counter::exceptional_entry_escaped_env,
     Counter::compiled_branch_count,
     Counter::compile_time_ns,
     Counter::compilation_failure,
@@ -402,6 +403,7 @@ make_counters! {
     invokesuper_megamorphic,
     invokesuper_no_cme,
     invokesuper_no_me,
+    invokesuper_bmethod_zsuper,
     invokesuper_not_iseq_or_cfunc,
     invokesuper_refinement,
     invokesuper_singleton_class,
@@ -599,6 +601,8 @@ make_counters! {
 
     iseq_stack_too_large,
     iseq_too_long,
+
+    exceptional_entry_escaped_env,
 
     temp_reg_opnd,
     temp_mem_opnd,

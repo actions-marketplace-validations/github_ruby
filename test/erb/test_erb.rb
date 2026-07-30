@@ -598,10 +598,10 @@ EOS
   def test_frozen_string_literal
     bug12031 = '[ruby-core:73561] [Bug #12031]'
     e = @erb.new("<%#encoding: us-ascii%>a")
-    e.src.sub!(/\A#(?:-\*-)?(.*)(?:-\*-)?/) {
+    src = e.src.sub(/\A#(?:-\*-)?(.*)(?:-\*-)?/) {
       '# -*- \1; frozen-string-literal: true -*-'
     }
-    assert_equal("a", e.result, bug12031)
+    assert_equal("a", eval(src), bug12031)
 
     %w(false true).each do |flag|
       erb = @erb.new("<%#frozen-string-literal: #{flag}%><%=''.frozen?%>")
@@ -662,6 +662,33 @@ EOS
     erb.instance_variable_set(:@_init, true)
     erb = Marshal.load(Marshal.dump(erb))
     assert_raise(ArgumentError) {erb.result}
+  end
+
+  def test_prohibited_marshal_load_def_method
+    erb = ERB.allocate
+    erb.instance_variable_set(:@src, "")
+    erb.instance_variable_set(:@lineno, 1)
+    erb.instance_variable_set(:@_init, true)
+    erb = Marshal.load(Marshal.dump(erb))
+    assert_raise(ArgumentError) {erb.def_method(Class.new, 'render')}
+  end
+
+  def test_prohibited_marshal_load_def_module
+    erb = ERB.allocate
+    erb.instance_variable_set(:@src, "")
+    erb.instance_variable_set(:@lineno, 1)
+    erb.instance_variable_set(:@_init, true)
+    erb = Marshal.load(Marshal.dump(erb))
+    assert_raise(ArgumentError) {erb.def_module}
+  end
+
+  def test_prohibited_marshal_load_def_class
+    erb = ERB.allocate
+    erb.instance_variable_set(:@src, "")
+    erb.instance_variable_set(:@lineno, 1)
+    erb.instance_variable_set(:@_init, true)
+    erb = Marshal.load(Marshal.dump(erb))
+    assert_raise(ArgumentError) {erb.def_class}
   end
 
   def test_multi_line_comment_lineno

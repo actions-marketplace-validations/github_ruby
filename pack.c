@@ -19,6 +19,7 @@
 #include "internal.h"
 #include "internal/array.h"
 #include "internal/bits.h"
+#include "internal/numeric.h"
 #include "internal/string.h"
 #include "internal/symbol.h"
 #include "internal/variable.h"
@@ -61,7 +62,7 @@ is_bigendian(void)
 {
     static int init = 0;
     static int endian_value;
-    char *p;
+    const char *p;
 
     if (init) return endian_value;
     init = 1;
@@ -118,6 +119,7 @@ typedef union {
 #define MAX_INTEGER_PACK_SIZE 8
 
 static const char toofew[] = "too few arguments";
+static const char intoitself[] = "cannot pack buffer object into itself";
 
 static void encodes(VALUE,const char*,long,int,int);
 static void qpencode(VALUE,VALUE,long);
@@ -279,6 +281,8 @@ pack_pack(rb_execution_context_t *ec, VALUE ary, VALUE fmt, VALUE buffer)
 #define MORE_ITEM (idx < RARRAY_LEN(ary))
 #define THISFROM (MORE_ITEM ? RARRAY_AREF(ary, idx) : TOO_FEW)
 #define NEXTFROM (MORE_ITEM ? RARRAY_AREF(ary, idx++) : TOO_FEW)
+#define NOT_BUFFER(val) (((val) == res) ? rb_raise(rb_eArgError, intoitself) : (void)0)
+#define STR_FROM(val) NOT_BUFFER(StringValue(val))
 
     while (p < pend) {
         int explicit_endian = 0;
@@ -333,7 +337,7 @@ pack_pack(rb_execution_context_t *ec, VALUE ary, VALUE fmt, VALUE buffer)
                 plen = 0;
             }
             else {
-                StringValue(from);
+                STR_FROM(from);
                 ptr = RSTRING_PTR(from);
                 plen = RSTRING_LEN(from);
             }
@@ -677,50 +681,48 @@ pack_pack(rb_execution_context_t *ec, VALUE ary, VALUE fmt, VALUE buffer)
                 }
 
                 while (len-- > 0) {
-                    size_t numbytes;
-                    int sign;
+                    size_t numbytes, nlz_bits;
+                    int sign, extra = 0;
                     char *cp;
+                    const long start = RSTRING_LEN(res);
 
                     from = NEXTFROM;
                     from = rb_to_int(from);
-                    numbytes = rb_absint_numwords(from, 7, NULL);
-                    if (numbytes == 0)
-                        numbytes = 1;
-                    VALUE buf = rb_str_new(NULL, numbytes);
-
-                    sign = rb_integer_pack(from, RSTRING_PTR(buf), RSTRING_LEN(buf), 1, 1, pack_flags);
-
-                    if (sign < 0 && type == 'R') {
+                    if (type == 'R' && rb_int_negative_p(from)) {
                         rb_raise(rb_eArgError, "can't encode negative numbers in ULEB128");
                     }
 
-                    if (type == 'r') {
-                        /* Check if we need an extra byte for sign extension */
-                        unsigned char last_byte = (unsigned char)RSTRING_PTR(buf)[numbytes - 1];
-                        if ((sign >= 0 && (last_byte & 0x40)) ||  /* positive but sign bit set */
-                                (sign < 0 && !(last_byte & 0x40))) {  /* negative but sign bit clear */
-                            /* Need an extra byte */
-                            rb_str_resize(buf, numbytes + 1);
-                            RSTRING_PTR(buf)[numbytes] = sign < 0 ? 0x7f : 0x00;
-                            numbytes++;
-                        }
+                    numbytes = rb_absint_numwords(from, 7, &nlz_bits);
+                    if (numbytes == 0) {
+                        numbytes = 1;
                     }
+                    else if (nlz_bits == 0 && type == 'r') {
+                        /* No leading zero bits, we need an extra byte for sign extension */
+                        extra = 1;
+                    }
+                    rb_str_modify_expand(res, numbytes + extra);
 
-                    cp = RSTRING_PTR(buf);
+                    cp = RSTRING_PTR(res) + start;
+                    sign = rb_integer_pack(from, cp, numbytes, 1, 1, pack_flags);
+
+                    if (extra) {
+                        /* Need an extra byte */
+                        cp[numbytes++] = sign < 0 ? 0x7f : 0x00;
+                    }
+                    rb_str_set_len(res, start + numbytes);
+
                     while (1 < numbytes) {
                         *cp |= 0x80;
                         cp++;
                         numbytes--;
                     }
-
-                    rb_str_buf_cat(res, RSTRING_PTR(buf), RSTRING_LEN(buf));
                 }
             }
             break;
           case 'u':		/* uuencoded string */
           case 'm':		/* base64 encoded string */
             from = NEXTFROM;
-            StringValue(from);
+            STR_FROM(from);
             ptr = RSTRING_PTR(from);
             plen = RSTRING_LEN(from);
 
@@ -750,6 +752,7 @@ pack_pack(rb_execution_context_t *ec, VALUE ary, VALUE fmt, VALUE buffer)
 
           case 'M':		/* quoted-printable encoded string */
             from = rb_obj_as_string(NEXTFROM);
+            NOT_BUFFER(from);
             if (len <= 1)
                 len = 72;
             qpencode(res, from, len);
@@ -758,7 +761,7 @@ pack_pack(rb_execution_context_t *ec, VALUE ary, VALUE fmt, VALUE buffer)
           case 'P':		/* pointer to packed byte string */
             from = THISFROM;
             if (!NIL_P(from)) {
-                StringValue(from);
+                STR_FROM(from);
                 if (RSTRING_LEN(from) < len) {
                     rb_raise(rb_eArgError, "too short buffer for P(%ld for %ld)",
                              RSTRING_LEN(from), len);
@@ -768,13 +771,11 @@ pack_pack(rb_execution_context_t *ec, VALUE ary, VALUE fmt, VALUE buffer)
             /* FALL THROUGH */
           case 'p':		/* pointer to string */
             while (len-- > 0) {
-                char *t;
+                const char *t = 0;
                 from = NEXTFROM;
-                if (NIL_P(from)) {
-                    t = 0;
-                }
-                else {
-                    t = StringValuePtr(from);
+                if (!NIL_P(from)) {
+                    STR_FROM(from);
+                    t = RSTRING_PTR(from);
                 }
                 if (!associates) {
                     associates = rb_ary_new();
@@ -1000,8 +1001,8 @@ static VALUE
 pack_unpack_internal(VALUE str, VALUE fmt, enum unpack_mode mode, long offset)
 {
 #define hexdigits ruby_hexdigits
-    char *s, *send;
-    char *p, *pend;
+    const char *s, *send;
+    const char *p, *pend;
     VALUE ary, associates = Qfalse;
     long len;
     AVOID_CC_BUG long tmp_len;
@@ -1023,9 +1024,10 @@ pack_unpack_internal(VALUE str, VALUE fmt, enum unpack_mode mode, long offset)
     StringValue(fmt);
     rb_must_asciicompat(fmt);
 
-    if (offset < 0) rb_raise(rb_eArgError, "offset can't be negative");
     len = RSTRING_LEN(str);
-    if (offset > len) rb_raise(rb_eArgError, "offset outside of string");
+    if (offset < 0 ? (offset += len) < 0 : offset > len) {
+        rb_raise(rb_eArgError, "offset outside of string");
+    }
 
     s = RSTRING_PTR(str);
     send = s + len;
@@ -1075,7 +1077,7 @@ pack_unpack_internal(VALUE str, VALUE fmt, enum unpack_mode mode, long offset)
             if (len > send - s) len = send - s;
             {
                 long end = len;
-                char *t = s + len - 1;
+                const char *t = s + len - 1;
 
                 while (t >= s) {
                     if (*t != ' ' && *t != '\0') break;
@@ -1088,7 +1090,7 @@ pack_unpack_internal(VALUE str, VALUE fmt, enum unpack_mode mode, long offset)
 
           case 'Z':
             {
-                char *t = s;
+                const char *t = s;
 
                 if (len > send-s) len = send-s;
                 while (t < s+len && *t) t++;
@@ -1522,7 +1524,8 @@ pack_unpack_internal(VALUE str, VALUE fmt, enum unpack_mode mode, long offset)
           case 'M':
             {
                 VALUE buf = rb_str_new(0, send - s);
-                char *ptr = RSTRING_PTR(buf), *ss = s;
+                char *ptr = RSTRING_PTR(buf);
+                const char *ss = s;
                 int csum = 0;
                 int c1, c2;
 
@@ -1577,7 +1580,7 @@ pack_unpack_internal(VALUE str, VALUE fmt, enum unpack_mode mode, long offset)
           case 'P':
             if (sizeof(char *) <= (size_t)(send - s)) {
                 VALUE tmp = Qnil;
-                char *t;
+                const char *t;
 
                 UNPACK_FETCH(&t, char *);
                 if (t) {
@@ -1600,7 +1603,7 @@ pack_unpack_internal(VALUE str, VALUE fmt, enum unpack_mode mode, long offset)
                     break;
                 else {
                     VALUE tmp = Qnil;
-                    char *t;
+                    const char *t;
 
                     UNPACK_FETCH(&t, char *);
                     if (t) {
@@ -1620,7 +1623,7 @@ pack_unpack_internal(VALUE str, VALUE fmt, enum unpack_mode mode, long offset)
                 if (type == 'r') {
                     pack_flags |= INTEGER_PACK_2COMP;
                 }
-                char *s0 = s;
+                const char *s0 = s;
                 while (len > 0 && s < send) {
                     if (*s & 0x80) {
                         s++;
@@ -1647,7 +1650,7 @@ pack_unpack_internal(VALUE str, VALUE fmt, enum unpack_mode mode, long offset)
 
           case 'w':
             {
-                char *s0 = s;
+                const char *s0 = s;
                 while (len > 0 && s < send) {
                     if (*s & 0x80) {
                         s++;
